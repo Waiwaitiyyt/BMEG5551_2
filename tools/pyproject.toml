@@ -1,0 +1,22 @@
+[project]
+name = "tools"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Waiwaitiyyt", email = "waiwaitiyyt@outlook.com" }
+]
+requires-python = ">=3.11.15"
+dependencies = [
+    "kagglehub>=1.0.2",
+    "matplotlib>=3.11.1",
+    "numpy>=2.4.6",
+    "scikit-image>=0.26.0",
+]
+
+[project.scripts]
+tools = "tools:main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
