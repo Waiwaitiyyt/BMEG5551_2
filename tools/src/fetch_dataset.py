@@ -12,3 +12,5 @@ import matplotlib.pyplot as plt
 path = kagglehub.dataset_download("tawsifurrahman/aseptic-loose-hip-implant-xray-database")
 
 print("Path to dataset files:", path)
+
+# Dataset are stored in the root dir defaultly.

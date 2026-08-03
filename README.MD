@@ -1,6 +1,6 @@
 # BMEG5552/1 Project - Implant Loosening Detection
 
-This is a demo repository for loosening detection on implant X-ray images.
+This is a demo repository for loosening detection on implant X-ray images. The general idea is to build a simple `YOLO` demo model to identify and locate the implant location inside a X-ray images, showing the first step of the entire workflow. 
 
 ## Setting-up
 
@@ -32,13 +32,29 @@ Python dependencies are managed with [uv](https://docs.astral.sh/uv/), which han
    cd server/py   # or tools
    uv sync
    ```
+
    This creates a `.venv` using the Python version pinned in `.python-version` and installs dependencies from `pyproject.toml`.
 3. Run scripts inside the environment with `uv run`, e.g.:
    ```sh
    uv run python src/fetch_dataset.py
    ```
 
-
 ## Datasets
 
 The datasets are currently fetched from **kaggle** website. Download the dataset by running `./tools/src/fetch_dataset.py`.
+
+## Labelling
+
+2 label-studio start scripts are inside `./tools/src`. Run the script to start the label-studio on your machine.
+
+**Linux**
+
+```bash
+./start_label_studio.sh
+```
+
+**Windows**
+
+```PowerShell
+.\start_label_studio.ps
+```
