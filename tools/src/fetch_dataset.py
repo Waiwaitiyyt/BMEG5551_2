@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 root_dir = Path(__file__).parent.parent.parent
-os.environ["KAGGLEHUB_CACHE"] = str(root_dir) + r"\datasets" # If in Linux, change the path to "/datasets" instead of "\datasets"
+os.environ["KAGGLEHUB_CACHE"] = str(root_dir)  
 
 import kagglehub
 import matplotlib.pyplot as plt
