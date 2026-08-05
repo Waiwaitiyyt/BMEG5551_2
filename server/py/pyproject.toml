@@ -1,21 +1,7 @@
 [project]
 name = "py"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-authors = [
-    { name = "Waiwaitiyyt", email = "waiwaitiyyt@outlook.com" }
-]
-requires-python = ">=3.11.15"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.141.1",
-    "numpy>=2.4.6",
-    "ultralytics>=8.4.114",
 ]
-
-[project.scripts]
-py = "py:main"
-
-[build-system]
-requires = ["uv_build>=0.12.0,<0.13.0"]
-build-backend = "uv_build"
