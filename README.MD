@@ -1,6 +1,6 @@
 # BMEG5552 — Implant Loosening Detection (Demo Prototype)
 
-This is the group project repository for **BMEG5552** (Medical Device Development) at the **University of Western Australia**. The project demonstrates the first step of a software pipeline for detecting **aseptic loosening** of orthopaedic implants from X-ray images.
+This is the group project repository for **BMEG5552** at the **University of Western Australia**. The project demonstrates the first step of a software pipeline for detecting **aseptic loosening** of orthopaedic implants from X-ray images.
 
 > **Important:** This is a **demo prototype**. It focuses on locating the implant inside an X-ray image. The actual diagnosis of loosening is not implemented — this project shows what the full workflow *would* look like.
 
@@ -46,9 +46,7 @@ An additional Express (Node.js) server handles data storage and other supporting
 │   ├── py/                  # Python backend — FastAPI + YOLO inference
 │   │   ├── pyproject.toml   #   Python dependencies (FastAPI, Ultralytics)
 │   │   ├── .python-version  #   Python version (3.11+)
-│   │   └── src/
-│   │       └── py/
-│   │           └── __init__.py
+│   │   └── server.py        #   FastAPI app entrypoint
 │   │
 │   └── ts/                  # TypeScript backend — Express (data storage, etc.)
 │       ├── package.json     #   Node dependencies (Express)
@@ -56,13 +54,11 @@ An additional Express (Node.js) server handles data storage and other supporting
 │       └── src/
 │           └── server.ts
 │
-├── tools/                   # Utility scripts (dataset download, labelling)
-│   ├── pyproject.toml       #   Python dependencies (kagglehub, label-studio)
+├── tools/                   # Utility scripts (dataset download, labelling, training)
+│   ├── pyproject.toml       #   Python dependencies (kagglehub, label-studio, ultralytics)
 │   ├── .python-version
-│   └── src/
-│       ├── fetch_dataset.py #   Download X-ray datasets from Kaggle
-│       ├── label.sh         #   Start Label Studio (Linux/macOS)
-│       └── label.ps1        #   Start Label Studio (Windows PowerShell)
+│   ├── fetch_dataset.py     #   Download X-ray datasets from Kaggle
+│   └── train.py             #   Train the YOLO model
 │
 ├── .gitignore
 └── README.MD                # This file
@@ -151,7 +147,7 @@ The dataset is hosted on [Kaggle](https://www.kaggle.com/datasets/tawsifurrahman
 
 ```bash
 cd tools
-uv run python src/fetch_dataset.py
+uv run python fetch_dataset.py
 ```
 
 The script will download the X-ray images and print the path where they are stored. Dataset files are saved in the project root directory.
@@ -166,17 +162,18 @@ Start Label Studio:
 
 ```bash
 cd tools
-bash src/label.sh
+NLTK_DISABLE_IMPORT_SECURITY=1 uv run label-studio start
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
 cd tools
-.\src\label.ps1
+$env:NLTK_DISABLE_IMPORT_SECURITY = "1"
+uv run label-studio start
 ```
 
-> If Label Studio fails to start with an `ImportError: Blocked import of regex from current working directory` error, see [Troubleshooting](#troubleshooting) below. The start scripts already work around this, but it can still occur if you run `label-studio` manually.
+> If you omit `NLTK_DISABLE_IMPORT_SECURITY=1`, Label Studio may fail to start with an `ImportError: Blocked import of regex from current working directory` error — see [Troubleshooting](#troubleshooting) below.
 
 Once Label Studio opens in your browser:
 
@@ -188,7 +185,12 @@ Once Label Studio opens in your browser:
 
 ### Step 3: Train the YOLO Model
 
-Using the Ultralytics library (already installed in the `server/py` environment), train a YOLO object detection model on your labelled dataset. The training script will be added to `server/py/src/`.
+Using the Ultralytics library (installed in the `tools` environment), train a YOLO object detection model on your labelled dataset:
+
+```bash
+cd tools
+uv run python train.py
+```
 
 After training, you will get a `.pt` file (the trained model). Place this file where the FastAPI server can find it.
 
@@ -219,7 +221,7 @@ Open `public/index.html` in a browser, or serve it through the Express server. U
 - **Python versions** are pinned in `.python-version` files inside each component folder. `uv sync` respects these automatically — you do not need to manually manage Python versions.
 - **Always use `uv run`** when executing Python scripts inside a component. This ensures the correct virtual environment is active. For example:
   ```bash
-  cd tools && uv run python src/fetch_dataset.py
+  cd tools && uv run python fetch_dataset.py
   ```
 - **Datasets are git-ignored.** The `.gitignore` file excludes the `datasets/` and `dataset/` folders, so downloaded images are not committed to the repository.
 - This project is a **prototype for educational purposes**. It is not intended for clinical use.
@@ -230,7 +232,7 @@ Open `public/index.html` in a browser, or serve it through the Express server. U
 
 ### Label Studio: `ImportError: Blocked import of regex from current working directory`
 
-**Symptom:** Running `label-studio` (directly, e.g. `uv run label-studio --version`, rather than via `src/label.sh` / `src/label.ps1`) fails with a traceback like:
+**Symptom:** Running `label-studio` without `NLTK_DISABLE_IMPORT_SECURITY=1` set (e.g. `uv run label-studio --version`) fails with a traceback like:
 
 ```
 File ".../nltk/inisec.py", line 128, in find_spec
@@ -254,5 +256,3 @@ NLTK_DISABLE_IMPORT_SECURITY=1 uv run label-studio start
 $env:NLTK_DISABLE_IMPORT_SECURITY = "1"
 uv run label-studio start
 ```
-
-`tools/src/label.sh` and `tools/src/label.ps1` already set this variable, so use those scripts instead of calling `label-studio` directly whenever possible.
