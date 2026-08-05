@@ -14,3 +14,7 @@ wheels/
 # Datasets
 datasets/
 dataset/
+
+# AI 
+.claude/
+.qwen/

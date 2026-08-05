@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.11.15"
 dependencies = [
     "kagglehub>=1.0.2",
+    "label-studio>=1.23.0",
     "matplotlib>=3.11.1",
     "numpy>=2.4.6",
     "scikit-image>=0.26.0",
