@@ -2,3 +2,5 @@
 import ultralytics
 import matplotlib 
 from PIL import Image
+
+print("Hello world")
