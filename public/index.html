@@ -3,9 +3,144 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>Implant Loosening Detection — BMEG5552</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    
+    <div class="app-shell">
+
+        <header class="site-header">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M4 12h4l2-7 4 14 2-7h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </span>
+                <div class="brand-text">
+                    <span class="brand-title">Implant Locator</span>
+                    <span class="brand-subtitle">BMEG5552 · UWA</span>
+                </div>
+            </div>
+            <span class="badge badge-prototype">Demo Prototype</span>
+        </header>
+
+        <main class="layout">
+
+            <section class="intro">
+                <h1>Aseptic Loosening Detection Pipeline</h1>
+                <p>
+                    Upload an X-ray image to locate the orthopaedic implant using a YOLO object-detection model.
+                    This step demonstrates implant localisation only — full loosening diagnosis is not implemented.
+                </p>
+                <ul class="pipeline-steps" aria-label="Pipeline steps">
+                    <li class="step is-active">
+                        <span class="step-index">1</span>
+                        <span class="step-label">Upload X-ray</span>
+                    </li>
+                    <li class="step-divider" aria-hidden="true"></li>
+                    <li class="step">
+                        <span class="step-index">2</span>
+                        <span class="step-label">Run YOLO Inference</span>
+                    </li>
+                    <li class="step-divider" aria-hidden="true"></li>
+                    <li class="step">
+                        <span class="step-index">3</span>
+                        <span class="step-label">Review Bounding Box</span>
+                    </li>
+                </ul>
+            </section>
+
+            <section class="workspace">
+
+                <div class="panel upload-panel">
+                    <div class="panel-header">
+                        <h2>X-ray Image</h2>
+                    </div>
+
+                    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload X-ray image">
+                        <input type="file" id="file-input" accept="image/png, image/jpeg, image/webp" hidden>
+
+                        <div id="dropzone-empty" class="dropzone-content">
+                            <span class="dropzone-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 16V4m0 0L7 9m5-5 5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                            </span>
+                            <p class="dropzone-title">Drag &amp; drop an X-ray image</p>
+                            <p class="dropzone-hint">or click to browse · PNG, JPEG, WEBP</p>
+                        </div>
+
+                        <div id="image-stage" class="image-stage" hidden>
+                            <img id="preview-image" alt="X-ray preview">
+                            <canvas id="overlay-canvas"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="upload-meta" id="upload-meta" hidden>
+                        <span id="file-name" class="file-name"></span>
+                        <span id="file-dims" class="file-dims"></span>
+                    </div>
+
+                    <div class="panel-actions">
+                        <button id="analyze-btn" class="btn btn-primary" disabled>
+                            <span class="btn-spinner" aria-hidden="true"></span>
+                            <span class="btn-label">Run Detection</span>
+                        </button>
+                        <button id="reset-btn" class="btn btn-ghost" disabled>Clear</button>
+                    </div>
+                </div>
+
+                <div class="panel results-panel">
+                    <div class="panel-header">
+                        <h2>Detection Result</h2>
+                        <span id="status-pill" class="status-pill status-idle">Idle</span>
+                    </div>
+
+                    <div id="results-empty" class="results-empty">
+                        <p>Upload an X-ray and run detection to see the implant bounding box and confidence score here.</p>
+                    </div>
+
+                    <div id="results-error" class="results-error" hidden>
+                        <p id="error-message"></p>
+                    </div>
+
+                    <div id="results-content" class="results-content" hidden>
+                        <dl class="detection-list" id="detection-list"></dl>
+                    </div>
+                </div>
+
+            </section>
+
+            <section class="config-note">
+                <details>
+                    <summary>Backend connection settings</summary>
+                    <p>
+                        The frontend sends the image to the FastAPI inference server via
+                        <code>POST /predict</code> (multipart form field <code>file</code>), expecting a JSON
+                        response with detected bounding boxes. Edit <code>API_BASE_URL</code> at the top of
+                        <code>app.js</code> once the server endpoint is finalised.
+                    </p>
+                </details>
+            </section>
+
+        </main>
+
+        <footer class="site-footer">
+            <p>Prototype for educational purposes only — not intended for clinical use.</p>
+            <p class="stack-tags">
+                <span>Vanilla JS</span>
+                <span>FastAPI</span>
+                <span>YOLO</span>
+                <span>Express</span>
+            </p>
+        </footer>
+
+    </div>
+
+    <script src="app.js"></script>
 </body>
 </html>
