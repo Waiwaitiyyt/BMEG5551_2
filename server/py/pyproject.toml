@@ -1,0 +1,20 @@
+[project]
+name = "server-py"
+version = "0.1.0"
+description = "FastAPI inference server for implant localisation (BMEG5552)."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.121.2",
+    "opencv-python-headless>=4.12.0.88",
+    "pillow>=11.3.0",
+    "python-multipart>=0.0.20",
+    "ultralytics>=8.4.115",
+    "uvicorn[standard]>=0.38.0",
+]
+
+# Ultralytics depends on `opencv-python`, whose wheels link against libGL — a
+# desktop GUI library that headless servers and slim containers do not ship.
+# The override keeps that variant out so `opencv-python-headless` above supplies
+# the `cv2` module instead. Same API, no GUI dependency.
+[tool.uv]
+override-dependencies = ["opencv-python; sys_platform == 'never'"]

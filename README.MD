@@ -18,9 +18,9 @@ In a real clinical tool, the next step would be to analyse the region around the
 ## How it works (high-level)
 
 ```
-X-ray Image  →  Frontend (web page)  →  FastAPI server (Python)  →  YOLO model  →  Image with bounding box  →  Back to Frontend
-                                                                         ↑
-                                                              trained on labelled data
+X-ray Image  →  Frontend (web page)  →  Express gateway  →  FastAPI server  →  YOLO model  →  Bounding boxes (JSON)  →  Back to Frontend
+                     :3000                  :3000            :8000                ↑
+                                     serves the page      /api → /predict   trained on labelled data
 ```
 
 1. **Get data** — Download X-ray images from Kaggle.
@@ -29,7 +29,10 @@ X-ray Image  →  Frontend (web page)  →  FastAPI server (Python)  →  YOLO m
 4. **Serve the model** — A FastAPI server loads the trained model, receives uploaded X-ray images, runs inference, and returns the image with the implant highlighted.
 5. **Show results** — A vanilla HTML/CSS/JS web page lets users upload an X-ray and see the result.
 
-An additional Express (Node.js) server handles data storage and other supporting tasks.
+The Express (Node.js) server is the single origin the browser talks to: it serves
+the static frontend and proxies `/api/*` to FastAPI, so no CORS setup is needed.
+The pipeline is stateless — uploads are held in memory for inference only and
+nothing is written to disk.
 
 ---
 
@@ -46,13 +49,15 @@ An additional Express (Node.js) server handles data storage and other supporting
 │   ├── py/                  # Python backend — FastAPI + YOLO inference
 │   │   ├── pyproject.toml   #   Python dependencies (FastAPI, Ultralytics)
 │   │   ├── .python-version  #   Python version (3.11+)
-│   │   └── server.py        #   FastAPI app entrypoint
+│   │   ├── server.py        #   FastAPI app entrypoint
+│   │   └── weights/
+│   │       └── best.pt      #   Trained YOLO checkpoint served by the API
 │   │
-│   └── ts/                  # TypeScript backend — Express (data storage, etc.)
-│       ├── package.json     #   Node dependencies (Express)
+│   └── ts/                  # TypeScript backend — Express gateway
+│       ├── package.json     #   Node dependencies (Express, http-proxy-middleware)
 │       ├── tsconfig.json
 │       └── src/
-│           └── server.ts
+│           └── server.ts    #   Static hosting + /api proxy to FastAPI
 │
 ├── tools/                   # Utility scripts (dataset download, labelling, training)
 │   ├── pyproject.toml       #   Python dependencies (kagglehub, label-studio, ultralytics)
@@ -266,19 +271,33 @@ uv run python train.py --model yolo11s.pt --name implant-large
 uv run python train.py --data ../my_dataset/data.yaml
 ```
 
-Use `--resume --model path/to/last.pt` to resume an interrupted run. Place the
-resulting `best.pt` where the FastAPI server is configured to load the model.
+Use `--resume --model path/to/last.pt` to resume an interrupted run. Copy the
+resulting checkpoint to where the FastAPI server loads it from:
+
+```bash
+cp runs/detect/implant/weights/best.pt server/py/weights/best.pt
+```
 
 ### Step 5: Run the Servers
 
-**Python (FastAPI) server** — handles YOLO inference:
+Both servers run at the same time, in two separate terminals.
+
+**Terminal 1 — Python (FastAPI) server**, runs YOLO inference on port 8000:
 
 ```bash
 cd server/py
-uv run <startup-command>   # to be configured
+uv run python server.py
 ```
 
-**TypeScript (Express) server** — handles data storage:
+Startup takes a few seconds while the checkpoint loads. The server is ready when
+it prints `Application startup complete.`; confirm with:
+
+```bash
+curl http://127.0.0.1:8000/health
+# {"status":"ok","model_path":".../weights/best.pt","classes":["Implant"], ...}
+```
+
+**Terminal 2 — TypeScript (Express) server**, serves the frontend on port 3000:
 
 ```bash
 cd server/ts
@@ -287,7 +306,100 @@ npm run dev
 
 ### Step 6: Open the Frontend
 
-Open `public/index.html` in a browser, or serve it through the Express server. Upload an X-ray image and see the implant highlighted with a bounding box.
+Open **<http://localhost:3000>** in a browser. Upload an X-ray image, click
+**Run Detection**, and the implant appears outlined with its confidence score.
+
+> Opening `public/index.html` directly from disk also works — `app.js` then falls
+> back to `http://localhost:8000` — but going through <http://localhost:3000> is
+> the intended path, and the one that needs no CORS configuration.
+
+---
+
+## API Reference
+
+The frontend calls the FastAPI server through the Express proxy: a request to
+`/api/predict` on port 3000 is forwarded to `/predict` on port 8000. Both routes
+below therefore work at `http://localhost:3000/api/...` and at
+`http://localhost:8000/...` directly.
+
+### `POST /predict`
+
+Runs implant detection on one uploaded image.
+
+**Request** — `multipart/form-data` with a single field `file` (PNG, JPEG, WEBP,
+BMP, or TIFF; 25 MB maximum).
+
+```bash
+curl -X POST http://localhost:3000/api/predict \
+  -F "file=@dataset/images/val/loose (103).png"
+```
+
+**Response** — `200 OK`
+
+```json
+{
+  "detections": [
+    { "label": "Implant", "confidence": 0.9592, "box": [55.32, 13.63, 312.75, 325.63] }
+  ],
+  "image_width": 331,
+  "image_height": 331
+}
+```
+
+`box` is `[x1, y1, x2, y2]` — the top-left and bottom-right corners in pixels of
+the **original uploaded image**, so the frontend can scale them to whatever size
+the preview is displayed at. `detections` is sorted by confidence, highest
+first, and is an empty array when nothing is found above the threshold.
+
+**Error responses** carry a `detail` string:
+
+| Status | Meaning                                                       |
+| ------ | ------------------------------------------------------------- |
+| 400    | File was empty, or could not be decoded as an image           |
+| 413    | Image exceeded `MAX_UPLOAD_BYTES`                             |
+| 422    | The `file` form field was missing                             |
+| 502    | Express could not reach FastAPI (inference server not running) |
+| 503    | FastAPI is up but the model has not finished loading           |
+
+### `GET /health`
+
+Reports model status, checkpoint path, class names, and the active thresholds.
+The Express gateway has its own `GET /healthz` that reports only whether the
+gateway itself is up.
+
+### Configuration
+
+Both servers read environment variables, so nothing needs editing to change a
+port or point at a different checkpoint.
+
+**FastAPI** (`server/py`):
+
+| Variable           | Default              | Purpose                                     |
+| ------------------ | -------------------- | ------------------------------------------- |
+| `MODEL_PATH`       | `weights/best.pt`    | YOLO checkpoint to load                     |
+| `CONF_THRESHOLD`   | `0.25`               | Minimum confidence for a detection          |
+| `IOU_THRESHOLD`    | `0.7`                | NMS IoU threshold                           |
+| `IMGSZ`            | `640`                | Inference image size — match training       |
+| `DEVICE`           | auto                 | `0`, `0,1`, or `cpu`                        |
+| `MAX_UPLOAD_BYTES` | `26214400` (25 MB)   | Upload size limit                           |
+| `HOST` / `PORT`    | `127.0.0.1` / `8000` | Bind address                                |
+| `ALLOWED_ORIGINS`  | `*`                  | Comma-separated CORS origins                |
+| `RELOAD`           | off                  | `1` to auto-reload on code changes          |
+
+**Express** (`server/ts`):
+
+| Variable        | Default                 | Purpose                              |
+| --------------- | ----------------------- | ------------------------------------ |
+| `INFERENCE_URL` | `http://127.0.0.1:8000` | Where to proxy `/api/*`              |
+| `PUBLIC_DIR`    | `../../public`          | Static directory to serve            |
+| `HOST` / `PORT` | `127.0.0.1` / `3000`    | Bind address                         |
+
+For example, to run inference on the first GPU with a stricter threshold:
+
+```bash
+cd server/py
+DEVICE=0 CONF_THRESHOLD=0.5 uv run python server.py
+```
 
 ---
 
@@ -299,6 +411,8 @@ Open `public/index.html` in a browser, or serve it through the Express server. U
   cd tools && uv run python fetch_dataset.py
   ```
 - **Datasets are git-ignored.** The `.gitignore` file excludes the `datasets/` and `dataset/` folders, so downloaded images are not committed to the repository.
+- **The trained checkpoint lives at `server/py/weights/best.pt`.** That is the default `MODEL_PATH`, so the FastAPI server finds it with no configuration. After retraining, copy the new `runs/detect/implant/weights/best.pt` over it.
+- **Both servers must be running** for the web page to work. Express alone serves the page but every detection returns `502`; FastAPI alone answers on port 8000 but nothing serves the frontend.
 - This project is a **prototype for educational purposes**. It is not intended for clinical use.
 
 ---
@@ -331,3 +445,37 @@ NLTK_DISABLE_IMPORT_SECURITY=1 uv run label-studio start
 $env:NLTK_DISABLE_IMPORT_SECURITY = "1"
 uv run label-studio start
 ```
+
+---
+
+### FastAPI server: `ImportError: libGL.so.1: cannot open shared object file`
+
+**Symptom:** `uv run python server.py` in `server/py` fails during startup while
+importing Ultralytics:
+
+```
+File ".../cv2/__init__.py", line 153, in bootstrap
+    native_module = importlib.import_module("cv2")
+ImportError: libGL.so.1: cannot open shared object file: No such file or directory
+```
+
+**Cause:** Ultralytics depends on `opencv-python`, whose wheels link against
+`libGL` — a desktop OpenGL library. Headless machines (servers, WSL without a GUI
+stack, slim Docker images) do not ship it, so the `cv2` native module fails to
+load even though the package installed cleanly.
+
+**Fix:** already applied — `server/py/pyproject.toml` pulls in
+`opencv-python-headless` and overrides `opencv-python` out of the dependency
+tree:
+
+```toml
+[tool.uv]
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+```
+
+The headless build exposes the identical `cv2` API without the GUI dependency.
+If you still hit this, run `uv sync` in `server/py` to pick up the override, and
+check that `uv pip list | grep opencv` shows only `opencv-python-headless`.
+
+Note that `tools/` deliberately keeps the regular `opencv-python`, since
+Ultralytics uses its display functions when plotting training results.

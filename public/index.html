@@ -119,10 +119,10 @@
                 <details>
                     <summary>Backend connection settings</summary>
                     <p>
-                        The frontend sends the image to the FastAPI inference server via
-                        <code>POST /predict</code> (multipart form field <code>file</code>), expecting a JSON
-                        response with detected bounding boxes. Edit <code>API_BASE_URL</code> at the top of
-                        <code>app.js</code> once the server endpoint is finalised.
+                        Served through the Express gateway (<code>server/ts</code>, port 3000), the page posts the
+                        image to <code>POST /api/predict</code> (multipart form field <code>file</code>). Express
+                        proxies that to the FastAPI inference server on port 8000, which returns JSON bounding
+                        boxes. Override the target with <code>API_BASE_URL</code> at the top of <code>app.js</code>.
                     </p>
                 </details>
             </section>

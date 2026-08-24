@@ -1,7 +1,6 @@
 // Frontend logic for the Implant Loosening Detection demo (BMEG5552).
 //
-// API contract (backend not yet implemented — adjust here once server.py
-// exposes the real endpoint):
+// API contract:
 //
 //   POST {API_BASE_URL}/predict
 //   Content-Type: multipart/form-data, field name "file"
@@ -9,16 +8,23 @@
 //   Response JSON:
 //   {
 //     "detections": [
-//       { "label": "implant", "confidence": 0.94, "box": [x1, y1, x2, y2] }
+//       { "label": "Implant", "confidence": 0.94, "box": [x1, y1, x2, y2] }
 //     ],
-//     "image_width": 1024,   // optional, px — original image the box coords refer to
-//     "image_height": 768    // optional, px
+//     "image_width": 1024,   // px — original image the box coords refer to
+//     "image_height": 768    // px
 //   }
 //
 //   box: [x1, y1, x2, y2] in pixel coordinates of the original uploaded image
 //   (top-left / bottom-right corners).
+//
+// When the page is served by the Express gateway (server/ts, port 3000) the
+// requests go to the same origin under /api, which Express proxies to the
+// FastAPI inference server. Opening index.html straight from disk (file://)
+// has no origin to inherit, so it falls back to FastAPI on localhost:8000 —
+// that path needs the FastAPI CORS settings to allow it.
 
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL =
+    window.location.protocol === "file:" ? "http://localhost:8000" : "/api";
 const PREDICT_ENDPOINT = `${API_BASE_URL}/predict`;
 
 const dropzone = document.getElementById("dropzone");
