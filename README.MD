@@ -58,6 +58,7 @@ An additional Express (Node.js) server handles data storage and other supporting
 │   ├── pyproject.toml       #   Python dependencies (kagglehub, label-studio, ultralytics)
 │   ├── .python-version
 │   ├── fetch_dataset.py     #   Download X-ray datasets from Kaggle
+│   ├── prepare_dataset.py   #   Match Label Studio exports and split YOLO data
 │   └── train.py             #   Train the YOLO model
 │
 ├── .gitignore
@@ -183,18 +184,92 @@ Once Label Studio opens in your browser:
 4. Label each image by drawing a box around the implant.
 5. Export the labels in **YOLO format** when finished.
 
-### Step 3: Train the YOLO Model
+### Step 3: Prepare the YOLO Dataset
 
-Using the Ultralytics library (installed in the `tools` environment), train a YOLO object detection model on your labelled dataset:
+The repository contains the downloaded source images under `datasets/` and the
+current Label Studio export under `label/labels/`. `tools/prepare_dataset.py`
+matches each label to its image, creates a reproducible train/validation split,
+and writes the directory structure expected by Ultralytics:
+
+```text
+dataset/
+├── data.yaml
+├── images/
+│   ├── train/
+│   └── val/
+└── labels/
+    ├── train/
+    └── val/
+```
+
+Run it from the project root (the default paths are already configured):
+
+```bash
+cd tools
+uv run python prepare_dataset.py
+```
+
+The default split is 80% training and 20% validation, with a fixed seed of
+`42`. To rebuild an existing output directory, add `--overwrite`. The input
+images are searched recursively, so the Kaggle directory layout does not need
+to be flattened. You can also provide custom locations, for example:
+
+```bash
+uv run python prepare_dataset.py \
+  --images-dir ../datasets \
+  --labels-dir ../label/labels \
+  --output-dir ../dataset \
+  --val-ratio 0.2 \
+  --seed 42
+```
+
+#### Required annotation format
+
+Export annotations from Label Studio in **YOLO format**. For every labelled
+image there must be one UTF-8 text file containing one object per line:
+
+```text
+class_id x_center y_center width height
+```
+
+The four box values are normalised to `[0, 1]` relative to the image (not pixel
+coordinates). This project currently has one class, `Implant`, so each row
+starts with class id `0`, for example:
+
+```text
+0 0.4949 0.5140 0.6497 0.9213
+```
+
+The label file name normally matches the image stem. The current Label Studio
+export uses names such as `724c...-loose_105.txt`; the preparation script maps
+that suffix to the source image `loose (105).png`. Images may be PNG, JPEG, BMP,
+TIFF, or WebP. A label without a matching image, malformed row, or box value
+outside `[0, 1]` stops the preparation with an actionable error.
+
+### Step 4: Train the YOLO Model
+
+After preparing the dataset, train using the Ultralytics `yolo11n.pt`
+pretrained checkpoint:
 
 ```bash
 cd tools
 uv run python train.py
 ```
 
-After training, you will get a `.pt` file (the trained model). Place this file where the FastAPI server can find it.
+The default run uses 100 epochs, 640-pixel images, and automatic batch-size
+selection. Results and checkpoints are written to `runs/detect/implant/`; the
+best checkpoint is `runs/detect/implant/weights/best.pt`. Common options:
 
-### Step 4: Run the Servers
+```bash
+uv run python train.py --epochs 150 --imgsz 640 --batch 16 --device 0
+uv run python train.py --model yolo11s.pt --name implant-large
+uv run python train.py --data ../my_dataset/data.yaml
+```
+
+Use `--resume --model path/to/last.pt` to resume an interrupted run. Place the
+resulting `best.pt` where the FastAPI server is configured to load the model.
+
+### Step 5: Run the Servers
 
 **Python (FastAPI) server** — handles YOLO inference:
 
@@ -210,7 +285,7 @@ cd server/ts
 npm run dev
 ```
 
-### Step 5: Open the Frontend
+### Step 6: Open the Frontend
 
 Open `public/index.html` in a browser, or serve it through the Express server. Upload an X-ray image and see the implant highlighted with a bounding box.
 
