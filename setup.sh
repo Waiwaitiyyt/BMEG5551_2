@@ -15,5 +15,5 @@ npm -v
 echo "nodejs installed successfully."
 
 # Install claude code
-curl -fsSL https://claude.ai/install.sh | bash
-claude --version
+# curl -fsSL https://claude.ai/install.sh | bash
+# claude --version

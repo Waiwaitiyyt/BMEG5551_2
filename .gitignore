@@ -18,3 +18,6 @@ dataset/
 # AI 
 .claude/
 .qwen/
+
+# Runtime logs from start.sh
+logs/
