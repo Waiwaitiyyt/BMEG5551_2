@@ -91,10 +91,35 @@
                 </div>
 
                 <div class="tool-right">
-                    <button type="button" class="chip-btn" id="compare-btn" disabled title="Show the previously analysed study alongside this one">
-                        <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z"/></svg>
-                        Compare prior
-                    </button>
+                    <div class="compare-wrap">
+                        <button type="button" class="chip-btn" id="compare-btn" disabled
+                                title="Pick two studies to show side by side"
+                                aria-haspopup="dialog" aria-expanded="false" aria-controls="compare-pop">
+                            <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z"/></svg>
+                            Compare
+                        </button>
+
+                        <div class="compare-pop" id="compare-pop" role="dialog" aria-label="Choose two studies to compare" hidden>
+                            <div class="pop-head">
+                                <span class="pop-title">Compare two studies</span>
+                                <span class="pop-hint" id="compare-hint">Pick one study for each side.</span>
+                            </div>
+                            <div class="pop-cols">
+                                <div class="pop-col">
+                                    <span class="pop-col-head">Left <b>A</b></span>
+                                    <ul class="pick-list" id="pick-left"></ul>
+                                </div>
+                                <div class="pop-col">
+                                    <span class="pop-col-head">Right <b>B</b></span>
+                                    <ul class="pick-list" id="pick-right"></ul>
+                                </div>
+                            </div>
+                            <div class="pop-foot">
+                                <button type="button" class="btn" id="compare-exit" hidden>Exit compare</button>
+                                <button type="button" class="btn btn-accent" id="compare-apply" disabled>Show comparison</button>
+                            </div>
+                        </div>
+                    </div>
                     <button type="button" class="zoom-readout" id="zoom-readout" title="Reset zoom and pan">100%</button>
                 </div>
             </div>
@@ -107,12 +132,12 @@
                 </div>
 
                 <div class="stage-frames" id="stage-frames" hidden>
-                    <figure class="frame frame-prior" id="frame-prior" hidden>
-                        <div class="frame-inner">
-                            <img id="prior-image" alt="Previously analysed X-ray">
-                            <div class="frame-overlays" id="prior-overlays"></div>
+                    <figure class="frame frame-left" id="frame-left" hidden>
+                        <div class="frame-inner" id="left-inner">
+                            <img id="left-image" alt="Study on the left of the comparison">
+                            <div class="frame-overlays" id="left-overlays"></div>
                         </div>
-                        <figcaption class="frame-tag" id="prior-tag"></figcaption>
+                        <figcaption class="frame-tag" id="left-tag"></figcaption>
                     </figure>
 
                     <figure class="frame frame-current">

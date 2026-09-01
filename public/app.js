@@ -52,16 +52,23 @@ const el = {
     stage: $("viewer-stage"),
     stageEmpty: $("stage-empty"),
     stageFrames: $("stage-frames"),
-    framePrior: $("frame-prior"),
+    frameLeft: $("frame-left"),
     frameInner: $("frame-inner"),
     viewerImage: $("viewer-image"),
     viewerOverlays: $("viewer-overlays"),
-    priorImage: $("prior-image"),
-    priorOverlays: $("prior-overlays"),
-    priorTag: $("prior-tag"),
+    leftInner: $("left-inner"),
+    leftImage: $("left-image"),
+    leftOverlays: $("left-overlays"),
+    leftTag: $("left-tag"),
     currentTag: $("current-tag"),
     overlaySeg: $("overlay-seg"),
     compareBtn: $("compare-btn"),
+    comparePop: $("compare-pop"),
+    compareHint: $("compare-hint"),
+    pickLeft: $("pick-left"),
+    pickRight: $("pick-right"),
+    compareApply: $("compare-apply"),
+    compareExit: $("compare-exit"),
     zoomReadout: $("zoom-readout"),
 
     cornerTl: $("corner-tl"), cornerTr: $("corner-tr"),
@@ -96,8 +103,13 @@ const el = {
 /** @type {Array<Study>} studies in queue order (newest last) */
 const studies = [];
 let activeId = null;
-let priorId = null;          // the study shown beside the active one
+let compareLeftId = null;    // left-hand study of the comparison; the right
+                             // frame is always the active study
 let nextId = 1;
+
+// What the compare picker currently has selected. Seeded from the live
+// comparison every time the popover opens, applied only on "Show comparison".
+const pick = { left: null, right: null };
 
 const view = {
     tool: "wl",              // wl | zoom | pan
@@ -133,17 +145,36 @@ function activeStudy() {
     return studies.find((s) => s.id === activeId) ?? null;
 }
 
-function priorStudy() {
-    return studies.find((s) => s.id === priorId) ?? null;
+function leftStudy() {
+    return studies.find((s) => s.id === compareLeftId) ?? null;
 }
 
-/** The most recent finished study that is not the active one. */
-function findPriorCandidate() {
+function studyById(id) {
+    return studies.find((s) => s.id === id) ?? null;
+}
+
+/**
+ * What the left side falls back to when the reader has not picked one — the
+ * most recent finished study other than `otherId`, or failing that the most
+ * recent study of any state.
+ */
+function defaultLeftCandidate(otherId) {
     for (let i = studies.length - 1; i >= 0; i -= 1) {
         const s = studies[i];
-        if (s.id !== activeId && s.status === "done") return s;
+        if (s.id !== otherId && s.status === "done") return s;
+    }
+    for (let i = studies.length - 1; i >= 0; i -= 1) {
+        if (studies[i].id !== otherId) return studies[i];
     }
     return null;
+}
+
+/** Keep the live comparison legal: two different studies, both still queued. */
+function reconcileCompare() {
+    if (!view.compare) return;
+    if (compareLeftId === activeId) compareLeftId = null;
+    if (!leftStudy()) compareLeftId = defaultLeftCandidate(activeId)?.id ?? null;
+    if (compareLeftId === null || activeId === null) view.compare = false;
 }
 
 function setText(node, value) {
@@ -265,9 +296,9 @@ function selectStudy(id) {
     activeId = id;
     resetTransform();
 
-    // Keep whatever finished study was last on screen as the compare target.
-    priorId = findPriorCandidate()?.id ?? null;
-    if (!priorId) view.compare = false;
+    // The right frame follows the active study, so a click in the queue swaps
+    // the right side of an open comparison and only the left side is kept.
+    reconcileCompare();
 
     renderAll();
 }
@@ -282,9 +313,8 @@ function removeStudy(id) {
         activeId = studies[Math.min(idx, studies.length - 1)]?.id ?? null;
         resetTransform();
     }
-    if (priorId === id) priorId = null;
-    priorId = priorId ?? findPriorCandidate()?.id ?? null;
-    if (!priorId) view.compare = false;
+    if (compareLeftId === id) compareLeftId = null;
+    reconcileCompare();
 
     renderAll();
 }
@@ -386,20 +416,20 @@ function renderViewer() {
         el.viewerImage.alt = `X-ray under review: ${study.name}`;
     }
 
-    const prior = view.compare ? priorStudy() : null;
-    el.stageFrames.classList.toggle("is-compare", !!prior);
-    el.stage.classList.toggle("is-compare", !!prior);
-    el.framePrior.hidden = !prior;
-    el.currentTag.hidden = !prior;
+    const left = view.compare ? leftStudy() : null;
+    el.stageFrames.classList.toggle("is-compare", !!left);
+    el.stage.classList.toggle("is-compare", !!left);
+    el.frameLeft.hidden = !left;
+    el.currentTag.hidden = !left;
 
-    if (prior) {
-        if (el.priorImage.getAttribute("src") !== prior.url) el.priorImage.src = prior.url;
-        el.priorImage.alt = `Previously analysed X-ray: ${prior.name}`;
-        el.priorTag.innerHTML = "";
-        el.priorTag.append(bold("PRIOR"), br(), text(prior.name), br(),
-            text(`${prior.width} × ${prior.height} px`));
+    if (left) {
+        if (el.leftImage.getAttribute("src") !== left.url) el.leftImage.src = left.url;
+        el.leftImage.alt = `Study A of the comparison: ${left.name}`;
+        el.leftTag.innerHTML = "";
+        el.leftTag.append(bold("A"), br(), text(left.name), br(),
+            text(`${left.width} × ${left.height} px`));
         el.currentTag.innerHTML = "";
-        el.currentTag.append(bold("CURRENT"), br(), text(study.name), br(),
+        el.currentTag.append(bold("B"), br(), text(study.name), br(),
             text(`${study.width} × ${study.height} px`));
     }
 
@@ -407,7 +437,7 @@ function renderViewer() {
     applyTransform();
     fitFrames();
     drawOverlays(el.viewerOverlays, study, false);
-    drawOverlays(el.priorOverlays, prior, true);
+    drawOverlays(el.leftOverlays, left, true);
 }
 
 const text = (t) => document.createTextNode(t);
@@ -422,7 +452,7 @@ function bold(t) { const b = document.createElement("b"); b.textContent = t; ret
  */
 function fitFrames() {
     fitOne(el.frameInner, activeStudy());
-    if (view.compare) fitOne(el.priorImage.parentElement, priorStudy());
+    if (view.compare) fitOne(el.leftInner, leftStudy());
 }
 
 function fitOne(inner, study) {
@@ -509,13 +539,13 @@ function applyWindowLevel() {
     const level = Math.max(1, Number(el.levelRange.value));
     const filter = `brightness(${(127.5 / level).toFixed(3)}) contrast(${(255 / win).toFixed(3)})`;
     el.viewerImage.style.filter = filter;
-    el.priorImage.style.filter = filter;
+    el.leftImage.style.filter = filter;
 }
 
 function applyTransform() {
     const t = `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`;
     el.frameInner.style.transform = t;
-    el.priorImage.parentElement.style.transform = t;
+    el.leftInner.style.transform = t;
     setText(el.zoomReadout, `${Math.round(view.zoom * 100)}%`);
 }
 
@@ -543,8 +573,121 @@ function setOverlay(mode) {
         btn.setAttribute("aria-pressed", String(on));
     });
     drawOverlays(el.viewerOverlays, activeStudy(), false);
-    drawOverlays(el.priorOverlays, view.compare ? priorStudy() : null, true);
+    drawOverlays(el.leftOverlays, view.compare ? leftStudy() : null, true);
     renderControls();
+}
+
+// ---------------------------------------------------------------------
+// Compare picker — the reader chooses the two studies themselves
+// ---------------------------------------------------------------------
+//
+// The right frame is always the active study, so applying a pair sets
+// `compareLeftId` for the left frame and makes the right pick active.
+
+function openPicker() {
+    if (studies.length < 2) return;
+    pick.right = activeStudy()?.id ?? studies[studies.length - 1].id;
+    pick.left = (view.compare ? compareLeftId : null) ?? defaultLeftCandidate(pick.right)?.id ?? null;
+    if (pick.left === pick.right) pick.left = null;
+
+    el.comparePop.hidden = false;
+    el.compareBtn.setAttribute("aria-expanded", "true");
+    renderPicker();
+}
+
+function closePicker() {
+    if (el.comparePop.hidden) return;
+    el.comparePop.hidden = true;
+    el.compareBtn.setAttribute("aria-expanded", "false");
+}
+
+function togglePicker() {
+    if (el.comparePop.hidden) openPicker(); else closePicker();
+}
+
+function renderPicker() {
+    renderPickList(el.pickLeft, "left");
+    renderPickList(el.pickRight, "right");
+
+    const left = studyById(pick.left);
+    const right = studyById(pick.right);
+    const ready = !!left && !!right && left.id !== right.id;
+
+    el.compareApply.disabled = !ready;
+    el.compareExit.hidden = !view.compare;
+    setText(el.compareHint, ready
+        ? `A ${left.name}  ·  B ${right.name}`
+        : "Pick one study for each side.");
+}
+
+function renderPickList(list, side) {
+    const other = side === "left" ? pick.right : pick.left;
+    list.replaceChildren();
+
+    studies.forEach((study) => {
+        const li = document.createElement("li");
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        const isOther = study.id === other;
+        btn.className = `pick-item${study.id === pick[side] ? " is-picked" : ""}${isOther ? " is-other" : ""}`;
+        btn.setAttribute("aria-pressed", String(study.id === pick[side]));
+        btn.title = isOther ? "Chosen on the other side — click to swap the two sides" : study.name;
+        btn.addEventListener("click", () => {
+            // A study can only sit on one side, so choosing the other side's
+            // pick swaps them rather than leaving a dead row.
+            if (isOther) [pick.left, pick.right] = [pick.right, pick.left];
+            else pick[side] = study.id;
+            renderPicker();
+        });
+
+        const thumb = document.createElement("span");
+        thumb.className = "queue-thumb";
+        const img = document.createElement("img");
+        img.src = study.url;
+        img.alt = "";
+        thumb.appendChild(img);
+
+        const body = document.createElement("span");
+        body.className = "queue-body";
+
+        const name = document.createElement("span");
+        name.className = "queue-name";
+        name.textContent = study.name;
+
+        const sub = document.createElement("span");
+        sub.className = "queue-sub";
+        sub.textContent = study.width
+            ? `${study.width} × ${study.height} · ${statusLabel(study)}`
+            : statusLabel(study);
+
+        body.append(name, sub);
+        btn.append(thumb, body);
+        li.appendChild(btn);
+        list.appendChild(li);
+    });
+}
+
+function applyCompare() {
+    const left = studyById(pick.left);
+    const right = studyById(pick.right);
+    if (!left || !right || left.id === right.id) return;
+
+    compareLeftId = left.id;
+    if (activeId !== right.id) {
+        activeId = right.id;
+        resetTransform();
+    }
+    view.compare = true;
+
+    closePicker();
+    renderAll();
+}
+
+function exitCompare() {
+    view.compare = false;
+    closePicker();
+    renderAll();
 }
 
 // ---------------------------------------------------------------------
@@ -788,9 +931,9 @@ function renderActions() {
         ? "Detecting…"
         : (study?.response ? "Re-run detection" : "Run detection");
 
-    const candidate = findPriorCandidate();
-    el.compareBtn.disabled = !candidate || !study;
-    el.compareBtn.classList.toggle("is-on", view.compare && !!candidate);
+    el.compareBtn.disabled = studies.length < 2;
+    el.compareBtn.classList.toggle("is-on", view.compare);
+    if (el.compareBtn.disabled) closePicker();
 }
 
 function renderAll() {
@@ -800,6 +943,7 @@ function renderAll() {
     renderFindings();
     renderSteps();
     renderActions();
+    if (!el.comparePop.hidden) renderPicker();
 }
 
 function noteError(message) {
@@ -843,9 +987,6 @@ async function runDetection() {
         study.detections = Array.isArray(data.detections) ? data.detections : [];
         study.latencyMs = data.inference_ms ?? (performance.now() - started);
         study.status = "done";
-
-        // The just-finished study becomes the compare target for the next one.
-        priorId = findPriorCandidate()?.id ?? null;
     } catch (err) {
         study.status = "error";
         study.response = null;
@@ -921,13 +1062,21 @@ el.overlaySeg.addEventListener("click", (e) => {
     if (btn) setOverlay(btn.dataset.overlay);
 });
 
-el.compareBtn.addEventListener("click", () => {
-    const candidate = findPriorCandidate();
-    if (!candidate) return;
-    priorId = candidate.id;
-    view.compare = !view.compare;
-    renderViewer();
-    renderActions();
+el.compareBtn.addEventListener("click", togglePicker);
+el.compareApply.addEventListener("click", applyCompare);
+el.compareExit.addEventListener("click", exitCompare);
+
+// Anywhere outside the popover — including the queue and the stage — closes it.
+document.addEventListener("pointerdown", (e) => {
+    if (el.comparePop.hidden) return;
+    if (!e.target.closest(".compare-wrap")) closePicker();
+});
+
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !el.comparePop.hidden) {
+        closePicker();
+        el.compareBtn.focus();
+    }
 });
 
 el.zoomReadout.addEventListener("click", () => {

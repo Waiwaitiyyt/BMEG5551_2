@@ -312,7 +312,7 @@ workstation:
 | Pane                   | What it does                                                                                                                                       |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Study queue** (left) | Drop one or many X-rays anywhere on the window to build a session queue. Each row shows its thumbnail, dimensions, and either its confidence or its state (`queued`, `running`, `none`, `error`). Filter by file name. Nothing is persisted server-side. |
-| **Viewer** (centre)    | The active study with the model's box drawn over it. Tools: **window/level**, **zoom**, **pan** — pick one, then drag on the image (the scroll wheel always zooms; click the zoom readout to reset). Overlay modes: **Box**, **Heatmap**, **Both**, **Off**. **Compare prior** splits the viewer against the previously analysed study. |
+| **Viewer** (centre)    | The active study with the model's box drawn over it. Tools: **window/level**, **zoom**, **pan** — pick one, then drag on the image (the scroll wheel always zooms; click the zoom readout to reset). Overlay modes: **Box**, **Heatmap**, **Both**, **Off**. **Compare** opens a picker for choosing any two queued studies, then splits the viewer between them (A on the left, B on the right; B is the active study). |
 | **Findings** (right)   | Status, confidence bar and `xyxy` per detection, the **inference controls**, the run metadata, the raw JSON response, and **Export JSON**.          |
 
 Two of the inference controls are sent to the model on the next run — the
