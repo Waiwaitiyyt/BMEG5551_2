@@ -3,144 +3,241 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Implant Loosening Detection — BMEG5552</title>
+    <title>Implant Locator Workstation — BMEG5552</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app-shell">
 
-        <header class="site-header">
-            <div class="brand">
-                <span class="brand-mark" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M4 12h4l2-7 4 14 2-7h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                </span>
-                <div class="brand-text">
-                    <span class="brand-title">Implant Locator</span>
-                    <span class="brand-subtitle">BMEG5552 · UWA</span>
+<div class="ws">
+
+    <!-- ════ top bar ════════════════════════════════════════════════ -->
+    <header class="ws-top">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M4 12h4l2-7 4 14 2-7h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            <span class="brand-text">
+                <span class="brand-title">Implant Locator</span>
+                <span class="brand-sub">BMEG5552 · UWA</span>
+            </span>
+        </div>
+
+        <div class="svc-chips">
+            <span class="chip" id="chip-model" title="Loaded checkpoint">— · YOLO</span>
+            <span class="chip"><i class="dot is-wait" id="dot-api"></i><span id="chip-api">FastAPI</span></span>
+            <span class="chip"><i class="dot is-wait" id="dot-web"></i><span id="chip-web">Express</span></span>
+        </div>
+
+        <span class="badge-proto">Demo prototype</span>
+    </header>
+
+    <div class="ws-body">
+
+        <!-- ════ study queue ════════════════════════════════════════ -->
+        <aside class="pane pane-queue">
+            <div class="pane-head">
+                <span class="pane-title">Study queue</span>
+                <span class="pane-count mono" id="queue-count">0</span>
+            </div>
+
+            <div class="queue-filter">
+                <div class="filter-box">
+                    <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/></svg>
+                    <input type="search" id="queue-filter" placeholder="Filter studies" aria-label="Filter studies by file name">
                 </div>
             </div>
-            <span class="badge badge-prototype">Demo Prototype</span>
-        </header>
 
-        <main class="layout">
+            <ul class="queue-list" id="queue-list"></ul>
+            <p class="queue-blank" id="queue-blank">No studies yet. Drop X-ray images below, or anywhere on the window, to build a queue.</p>
 
-            <section class="intro">
-                <h1>Aseptic Loosening Detection Pipeline</h1>
-                <p>
-                    Upload an X-ray image to locate the orthopaedic implant using a YOLO object-detection model.
-                    This step demonstrates implant localisation only — full loosening diagnosis is not implemented.
+            <div class="queue-foot">
+                <button type="button" class="dropzone" id="queue-add">
+                    <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0,39.38,216H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72ZM40,56H92.69l16,16H40ZM216,200H40V88H216Z"/></svg>
+                    Drop X-ray to add
+                </button>
+                <input type="file" id="file-input" accept="image/png, image/jpeg, image/webp" multiple hidden>
+            </div>
+        </aside>
+
+        <!-- ════ viewer ═════════════════════════════════════════════ -->
+        <section class="pane pane-viewer">
+
+            <div class="viewer-toolbar">
+                <div class="tool-group" role="group" aria-label="Viewer tools">
+                    <button type="button" class="tool is-on" data-tool="wl" title="Window / level — drag on the image" aria-pressed="true">
+                        <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Z"/></svg>
+                        <span class="sr-only">Window / level</span>
+                    </button>
+                    <button type="button" class="tool" data-tool="zoom" title="Zoom — drag or scroll on the image" aria-pressed="false">
+                        <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/></svg>
+                        <span class="sr-only">Zoom</span>
+                    </button>
+                    <button type="button" class="tool" data-tool="pan" title="Pan — drag on the image" aria-pressed="false">
+                        <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M221.66,133.66l-72,72a8,8,0,0,1-11.32-11.32L196.69,136H40a8,8,0,0,1,0-16H196.69L138.34,61.66a8,8,0,0,1,11.32-11.32l72,72A8,8,0,0,1,221.66,133.66Z"/></svg>
+                        <span class="sr-only">Pan</span>
+                    </button>
+
+                    <span class="tool-sep" aria-hidden="true"></span>
+
+                    <div class="seg" id="overlay-seg" role="group" aria-label="Overlay mode">
+                        <button type="button" data-overlay="box" class="is-on" aria-pressed="true">Box</button>
+                        <button type="button" data-overlay="heat" aria-pressed="false" title="Confidence bloom derived from the returned box — not a model saliency map">Heatmap</button>
+                        <button type="button" data-overlay="both" aria-pressed="false" title="Bounding box plus the box-derived confidence bloom">Both</button>
+                        <button type="button" data-overlay="off" aria-pressed="false">Off</button>
+                    </div>
+                </div>
+
+                <div class="tool-right">
+                    <button type="button" class="chip-btn" id="compare-btn" disabled title="Show the previously analysed study alongside this one">
+                        <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z"/></svg>
+                        Compare prior
+                    </button>
+                    <button type="button" class="zoom-readout" id="zoom-readout" title="Reset zoom and pan">100%</button>
+                </div>
+            </div>
+
+            <div class="viewer-stage tool-wl" id="viewer-stage">
+
+                <div class="stage-empty" id="stage-empty">
+                    <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z"/></svg>
+                    <p>Drop an X-ray anywhere on this window to load a study, then run YOLO detection to place the implant bounding box.</p>
+                </div>
+
+                <div class="stage-frames" id="stage-frames" hidden>
+                    <figure class="frame frame-prior" id="frame-prior" hidden>
+                        <div class="frame-inner">
+                            <img id="prior-image" alt="Previously analysed X-ray">
+                            <div class="frame-overlays" id="prior-overlays"></div>
+                        </div>
+                        <figcaption class="frame-tag" id="prior-tag"></figcaption>
+                    </figure>
+
+                    <figure class="frame frame-current">
+                        <div class="frame-inner" id="frame-inner">
+                            <img id="viewer-image" alt="X-ray under review">
+                            <div class="frame-overlays" id="viewer-overlays"></div>
+                        </div>
+                        <figcaption class="frame-tag" id="current-tag" hidden></figcaption>
+                    </figure>
+                </div>
+
+                <div class="corner corner-tl mono" id="corner-tl"></div>
+                <div class="corner corner-tr mono" id="corner-tr"></div>
+                <div class="corner corner-bl mono" id="corner-bl"></div>
+                <div class="corner corner-br mono" id="corner-br"></div>
+            </div>
+
+            <div class="viewer-foot">
+                <ol class="steps" id="steps">
+                    <li class="step" data-step="1"><span class="step-index">1</span><span class="step-label">Upload X-ray</span></li>
+                    <li class="step-rule" role="presentation"></li>
+                    <li class="step" data-step="2"><span class="step-index">2</span><span class="step-label">Run YOLO inference</span></li>
+                    <li class="step-rule" role="presentation"></li>
+                    <li class="step" data-step="3"><span class="step-index">3</span><span class="step-label">Review bounding box</span></li>
+                </ol>
+
+                <div class="viewer-actions">
+                    <button type="button" class="btn" id="clear-btn" disabled>Clear</button>
+                    <button type="button" class="btn btn-accent" id="run-btn" disabled>
+                        <span class="btn-label">Run detection</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ════ findings ═══════════════════════════════════════════ -->
+        <aside class="pane pane-findings">
+            <div class="pane-head bordered">
+                <span class="pane-title">Detection result</span>
+                <span class="status-pill" id="status-pill">Idle</span>
+            </div>
+
+            <div class="findings-scroll">
+
+                <div class="det-cards" id="det-cards"></div>
+
+                <p class="findings-note" id="findings-note">
+                    Select or drop a study, then run detection to see the implant bounding box and confidence here.
                 </p>
-                <ul class="pipeline-steps" aria-label="Pipeline steps">
-                    <li class="step is-active">
-                        <span class="step-index">1</span>
-                        <span class="step-label">Upload X-ray</span>
-                    </li>
-                    <li class="step-divider" aria-hidden="true"></li>
-                    <li class="step">
-                        <span class="step-index">2</span>
-                        <span class="step-label">Run YOLO Inference</span>
-                    </li>
-                    <li class="step-divider" aria-hidden="true"></li>
-                    <li class="step">
-                        <span class="step-index">3</span>
-                        <span class="step-label">Review Bounding Box</span>
-                    </li>
-                </ul>
-            </section>
 
-            <section class="workspace">
+                <section class="controls">
+                    <span class="block-title">Inference controls</span>
 
-                <div class="panel upload-panel">
-                    <div class="panel-header">
-                        <h2>X-ray Image</h2>
+                    <div class="ctrl">
+                        <div class="ctrl-head">
+                            <label for="conf-range">Confidence threshold</label>
+                            <output class="mono" id="conf-out" for="conf-range">0.50</output>
+                        </div>
+                        <div class="ctrl-track">
+                            <input type="range" id="conf-range" min="0.05" max="0.95" step="0.01" value="0.5">
+                            <span class="ctrl-tick" id="conf-tick" hidden></span>
+                        </div>
+                        <span class="ctrl-hint" id="conf-hint">Sent to the model on the next run.</span>
                     </div>
 
-                    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload X-ray image">
-                        <input type="file" id="file-input" accept="image/png, image/jpeg, image/webp" hidden>
-
-                        <div id="dropzone-empty" class="dropzone-content">
-                            <span class="dropzone-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                    <path d="M12 16V4m0 0L7 9m5-5 5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                                    <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                                </svg>
-                            </span>
-                            <p class="dropzone-title">Drag &amp; drop an X-ray image</p>
-                            <p class="dropzone-hint">or click to browse · PNG, JPEG, WEBP</p>
+                    <div class="ctrl">
+                        <div class="ctrl-head">
+                            <label for="iou-range">IoU (NMS)</label>
+                            <output class="mono" id="iou-out" for="iou-range">0.70</output>
                         </div>
-
-                        <div id="image-stage" class="image-stage" hidden>
-                            <img id="preview-image" alt="X-ray preview">
-                            <canvas id="overlay-canvas"></canvas>
+                        <div class="ctrl-track">
+                            <input type="range" id="iou-range" min="0.05" max="0.95" step="0.01" value="0.7">
                         </div>
                     </div>
 
-                    <div class="upload-meta" id="upload-meta" hidden>
-                        <span id="file-name" class="file-name"></span>
-                        <span id="file-dims" class="file-dims"></span>
+                    <div class="ctrl">
+                        <div class="ctrl-head">
+                            <label for="window-range">Window / level</label>
+                            <output class="mono" id="wl-out" for="window-range">240 / 128</output>
+                        </div>
+                        <div class="ctrl-pair">
+                            <span aria-hidden="true">W</span>
+                            <div class="ctrl-track">
+                                <input type="range" id="window-range" min="20" max="480" step="1" value="240" aria-label="Window width">
+                            </div>
+                            <span aria-hidden="true">L</span>
+                            <div class="ctrl-track">
+                                <input type="range" id="level-range" min="0" max="255" step="1" value="128" aria-label="Level">
+                            </div>
+                        </div>
+                        <span class="ctrl-hint">Display only — the model always sees the unmodified pixels.</span>
                     </div>
+                </section>
 
-                    <div class="panel-actions">
-                        <button id="analyze-btn" class="btn btn-primary" disabled>
-                            <span class="btn-spinner" aria-hidden="true"></span>
-                            <span class="btn-label">Run Detection</span>
-                        </button>
-                        <button id="reset-btn" class="btn btn-ghost" disabled>Clear</button>
-                    </div>
-                </div>
+                <dl class="meta-list">
+                    <span class="block-title">Run metadata</span>
+                    <div class="meta-row"><dt>Checkpoint</dt><dd id="meta-ckpt">—</dd></div>
+                    <div class="meta-row"><dt>Image size</dt><dd id="meta-imgsz">—</dd></div>
+                    <div class="meta-row"><dt>Classes</dt><dd id="meta-classes">—</dd></div>
+                    <div class="meta-row"><dt>Latency</dt><dd id="meta-latency">—</dd></div>
+                    <div class="meta-row"><dt>Endpoint</dt><dd id="meta-endpoint">/api/predict</dd></div>
+                </dl>
 
-                <div class="panel results-panel">
-                    <div class="panel-header">
-                        <h2>Detection Result</h2>
-                        <span id="status-pill" class="status-pill status-idle">Idle</span>
-                    </div>
-
-                    <div id="results-empty" class="results-empty">
-                        <p>Upload an X-ray and run detection to see the implant bounding box and confidence score here.</p>
-                    </div>
-
-                    <div id="results-error" class="results-error" hidden>
-                        <p id="error-message"></p>
-                    </div>
-
-                    <div id="results-content" class="results-content" hidden>
-                        <dl class="detection-list" id="detection-list"></dl>
-                    </div>
-                </div>
-
-            </section>
-
-            <section class="config-note">
-                <details>
-                    <summary>Backend connection settings</summary>
-                    <p>
-                        Served through the Express gateway (<code>server/ts</code>, port 3000), the page posts the
-                        image to <code>POST /api/predict</code> (multipart form field <code>file</code>). Express
-                        proxies that to the FastAPI inference server on port 8000, which returns JSON bounding
-                        boxes. Override the target with <code>API_BASE_URL</code> at the top of <code>app.js</code>.
-                    </p>
+                <details class="raw" id="raw-block" hidden>
+                    <summary>
+                        <span id="raw-req">POST /api/predict</span>
+                        <span class="raw-status" id="raw-status">200</span>
+                    </summary>
+                    <pre id="raw-body"></pre>
                 </details>
-            </section>
 
-        </main>
+                <div class="findings-actions">
+                    <button type="button" class="btn" id="export-btn" disabled>Export JSON</button>
+                </div>
 
-        <footer class="site-footer">
-            <p>Prototype for educational purposes only — not intended for clinical use.</p>
-            <p class="stack-tags">
-                <span>Vanilla JS</span>
-                <span>FastAPI</span>
-                <span>YOLO</span>
-                <span>Express</span>
-            </p>
-        </footer>
+                <p class="disclaimer">
+                    Localisation only. Loosening classification is not implemented — prototype for
+                    educational purposes, not for clinical use.
+                </p>
+            </div>
+        </aside>
 
     </div>
+</div>
 
-    <script src="app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

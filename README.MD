@@ -306,8 +306,22 @@ npm run dev
 
 ### Step 6: Open the Frontend
 
-Open **<http://localhost:3000>** in a browser. Upload an X-ray image, click
-**Run Detection**, and the implant appears outlined with its confidence score.
+Open **<http://localhost:3000>** in a browser. The page is a three-pane
+workstation:
+
+| Pane                   | What it does                                                                                                                                       |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Study queue** (left) | Drop one or many X-rays anywhere on the window to build a session queue. Each row shows its thumbnail, dimensions, and either its confidence or its state (`queued`, `running`, `none`, `error`). Filter by file name. Nothing is persisted server-side. |
+| **Viewer** (centre)    | The active study with the model's box drawn over it. Tools: **window/level**, **zoom**, **pan** — pick one, then drag on the image (the scroll wheel always zooms; click the zoom readout to reset). Overlay modes: **Box**, **Heatmap**, **Both**, **Off**. **Compare prior** splits the viewer against the previously analysed study. |
+| **Findings** (right)   | Status, confidence bar and `xyxy` per detection, the **inference controls**, the run metadata, the raw JSON response, and **Export JSON**.          |
+
+Two of the inference controls are sent to the model on the next run — the
+**confidence threshold** and the **IoU (NMS)** threshold. **Window/level** is a
+display-only adjustment: the bytes posted to the model are always the untouched
+original file.
+
+> The **Heatmap** overlay is a confidence bloom drawn from the returned box, not
+> a model saliency map. The model returns boxes only.
 
 > Opening `public/index.html` directly from disk also works — `app.js` then falls
 > back to `http://localhost:8000` — but going through <http://localhost:3000> is
@@ -326,12 +340,25 @@ below therefore work at `http://localhost:3000/api/...` and at
 
 Runs implant detection on one uploaded image.
 
-**Request** — `multipart/form-data` with a single field `file` (PNG, JPEG, WEBP,
-BMP, or TIFF; 25 MB maximum).
+**Request** — `multipart/form-data`:
+
+| Field   | Required | Range              | Purpose                                                       |
+| ------- | -------- | ------------------ | ------------------------------------------------------------- |
+| `file`  | yes      | 25 MB max          | PNG, JPEG, WEBP, BMP, or TIFF                                 |
+| `conf`  | no       | `0 < conf <= 1`    | Confidence threshold for this request only                    |
+| `iou`   | no       | `0 < iou <= 1`     | NMS IoU threshold for this request only                       |
+| `imgsz` | no       | `64`–`1536`        | Inference size for this request only; rounded up to a /32 step |
+
+Each optional field overrides the process-wide default for that one call — the
+server never mutates its own configuration, so concurrent requests cannot see
+each other's settings. Omit them all and the server's `CONF_THRESHOLD`,
+`IOU_THRESHOLD`, and `IMGSZ` apply. These three back the workstation's
+**Inference controls**.
 
 ```bash
 curl -X POST http://localhost:3000/api/predict \
-  -F "file=@dataset/images/val/loose (103).png"
+  -F "file=@dataset/images/val/loose (103).png" \
+  -F conf=0.35 -F iou=0.6
 ```
 
 **Response** — `200 OK`
@@ -342,7 +369,13 @@ curl -X POST http://localhost:3000/api/predict \
     { "label": "Implant", "confidence": 0.9592, "box": [55.32, 13.63, 312.75, 325.63] }
   ],
   "image_width": 331,
-  "image_height": 331
+  "image_height": 331,
+  "conf_threshold": 0.35,
+  "iou_threshold": 0.6,
+  "imgsz": 640,
+  "model": "best.pt",
+  "classes": ["Implant"],
+  "inference_ms": 41.7
 }
 ```
 
@@ -351,21 +384,44 @@ the **original uploaded image**, so the frontend can scale them to whatever size
 the preview is displayed at. `detections` is sorted by confidence, highest
 first, and is an empty array when nothing is found above the threshold.
 
+Everything after `image_height` echoes the settings this run actually used, so
+the viewer's corner annotation and the findings pane always describe the run
+that produced the boxes on screen rather than assuming the sliders and the
+server agree.
+
 **Error responses** carry a `detail` string:
 
 | Status | Meaning                                                       |
 | ------ | ------------------------------------------------------------- |
 | 400    | File was empty, or could not be decoded as an image           |
 | 413    | Image exceeded `MAX_UPLOAD_BYTES`                             |
-| 422    | The `file` form field was missing                             |
+| 422    | The `file` field was missing, or `conf`/`iou`/`imgsz` was out of range |
 | 502    | Express could not reach FastAPI (inference server not running) |
 | 503    | FastAPI is up but the model has not finished loading           |
 
 ### `GET /health`
 
-Reports model status, checkpoint path, class names, and the active thresholds.
+Reports model status and the defaults the frontend seeds its controls from.
+
+```json
+{
+  "status": "ok",
+  "model_path": "/…/server/py/weights/best.pt",
+  "model_name": "best.pt",
+  "classes": ["Implant"],
+  "conf_threshold": 0.5,
+  "iou_threshold": 0.7,
+  "imgsz": 640,
+  "device": "auto"
+}
+```
+
+`status` is `loading` until the checkpoint has finished loading. The page polls
+this every 15 s to drive the service chips in its top bar, and seeds the two
+threshold sliders from it — until you move one, after which the sliders win.
+
 The Express gateway has its own `GET /healthz` that reports only whether the
-gateway itself is up.
+gateway itself is up; it drives the second chip.
 
 ### Configuration
 
@@ -377,9 +433,9 @@ port or point at a different checkpoint.
 | Variable           | Default              | Purpose                                     |
 | ------------------ | -------------------- | ------------------------------------------- |
 | `MODEL_PATH`       | `weights/best.pt`    | YOLO checkpoint to load                     |
-| `CONF_THRESHOLD`   | `0.25`               | Minimum confidence for a detection          |
-| `IOU_THRESHOLD`    | `0.7`                | NMS IoU threshold                           |
-| `IMGSZ`            | `640`                | Inference image size — match training       |
+| `CONF_THRESHOLD`   | `0.5`                | Default confidence, when `conf` is not sent |
+| `IOU_THRESHOLD`    | `0.7`                | Default NMS IoU, when `iou` is not sent     |
+| `IMGSZ`            | `640`                | Default inference size, when `imgsz` is not sent — match training |
 | `DEVICE`           | auto                 | `0`, `0,1`, or `cpu`                        |
 | `MAX_UPLOAD_BYTES` | `26214400` (25 MB)   | Upload size limit                           |
 | `HOST` / `PORT`    | `127.0.0.1` / `8000` | Bind address                                |

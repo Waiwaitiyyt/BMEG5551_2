@@ -1,16 +1,43 @@
 """FastAPI inference server for implant localisation (BMEG5552 demo prototype).
 
-Loads the trained YOLO checkpoint once at startup and exposes a single
-inference endpoint used by the frontend:
+Loads the trained YOLO checkpoint once at startup and exposes the two
+endpoints the workstation frontend uses:
 
-    POST /predict   multipart/form-data, field "file"
+    GET  /health
+    ->  {
+          "status": "ok",
+          "model_path": "server/py/weights/best.pt",
+          "model_name": "best.pt",
+          "classes": ["Implant"],
+          "conf_threshold": 0.5,
+          "iou_threshold": 0.7,
+          "imgsz": 640,
+          "device": "cpu"
+        }
+
+    POST /predict   multipart/form-data
+        file    the image                          (required)
+        conf    per-request confidence threshold   (optional, 0 < conf <= 1)
+        iou     per-request NMS IoU threshold      (optional, 0 < iou  <= 1)
+        imgsz   per-request inference size         (optional, 64..1536)
     ->  {
           "detections": [
             {"label": "Implant", "confidence": 0.94, "box": [x1, y1, x2, y2]}
           ],
           "image_width": 1024,
-          "image_height": 768
+          "image_height": 768,
+          "conf_threshold": 0.5,
+          "iou_threshold": 0.7,
+          "imgsz": 640,
+          "model": "best.pt",
+          "classes": ["Implant"],
+          "inference_ms": 41.7
         }
+
+The three optional fields back the workstation's "Inference controls" sliders:
+they override the process-wide defaults for one request only, and the response
+echoes the values actually used so the viewer's corner annotation and the run
+metadata always describe the run that produced the boxes on screen.
 
 Box coordinates are pixels in the original uploaded image (top-left /
 bottom-right corners), which is exactly what public/app.js draws.
@@ -21,11 +48,12 @@ from __future__ import annotations
 import io
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
@@ -62,6 +90,13 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# Bounds for the per-request overrides. Ultralytics wants an imgsz that is a
+# multiple of 32; anything else is silently rounded up, so round it here and
+# report the value actually used.
+MIN_IMGSZ = 64
+MAX_IMGSZ = 1536
+IMGSZ_STRIDE = 32
+
 # Loaded during the lifespan startup hook.
 state: dict[str, Any] = {"model": None}
 
@@ -76,6 +111,37 @@ class PredictResponse(BaseModel):
     detections: list[Detection]
     image_width: int
     image_height: int
+    # Echo of the settings this run actually used, so the frontend never has to
+    # assume its sliders and the server agree.
+    conf_threshold: float
+    iou_threshold: float
+    imgsz: int
+    model: str
+    classes: list[str]
+    inference_ms: float
+
+
+def _validate_ratio(name: str, value: float | None, default: float) -> float:
+    if value is None:
+        return default
+    if not 0.0 < value <= 1.0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{name} must be greater than 0 and at most 1 (got {value}).",
+        )
+    return float(value)
+
+
+def _validate_imgsz(value: int | None) -> int:
+    if value is None:
+        return IMGSZ
+    if not MIN_IMGSZ <= value <= MAX_IMGSZ:
+        raise HTTPException(
+            status_code=422,
+            detail=f"imgsz must be between {MIN_IMGSZ} and {MAX_IMGSZ} (got {value}).",
+        )
+    # Round up to the model's stride so the echoed value matches reality.
+    return -(-int(value) // IMGSZ_STRIDE) * IMGSZ_STRIDE
 
 
 @asynccontextmanager
@@ -117,21 +183,37 @@ app.add_middleware(
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    """Liveness plus the defaults the frontend seeds its controls from."""
     model = state["model"]
     return {
         "status": "ok" if model is not None else "loading",
         "model_path": str(MODEL_PATH),
+        "model_name": MODEL_PATH.name,
         "classes": list(model.names.values()) if model is not None else [],
         "conf_threshold": CONF_THRESHOLD,
+        "iou_threshold": IOU_THRESHOLD,
         "imgsz": IMGSZ,
+        "device": DEVICE or "auto",
     }
 
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict(file: UploadFile = File(...)) -> PredictResponse:
+async def predict(
+    file: UploadFile = File(...),
+    conf: float | None = Form(None),
+    iou: float | None = Form(None),
+    imgsz: int | None = Form(None),
+) -> PredictResponse:
     model = state["model"]
     if model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded yet.")
+
+    # Per-request overrides for the workstation's inference sliders. Each one
+    # applies to this call only — the process-wide defaults are never mutated,
+    # so concurrent requests cannot see each other's settings.
+    eff_conf = _validate_ratio("conf", conf, CONF_THRESHOLD)
+    eff_iou = _validate_ratio("iou", iou, IOU_THRESHOLD)
+    eff_imgsz = _validate_imgsz(imgsz)
 
     raw = await file.read()
     if not raw:
@@ -154,14 +236,16 @@ async def predict(file: UploadFile = File(...)) -> PredictResponse:
     # X-rays are usually greyscale or 16-bit; YOLO expects 3-channel 8-bit RGB.
     image = image.convert("RGB")
 
+    started = time.perf_counter()
     results = model.predict(
         source=image,
-        conf=CONF_THRESHOLD,
-        iou=IOU_THRESHOLD,
-        imgsz=IMGSZ,
+        conf=eff_conf,
+        iou=eff_iou,
+        imgsz=eff_imgsz,
         device=DEVICE,
         verbose=False,
     )
+    inference_ms = (time.perf_counter() - started) * 1000.0
 
     detections: list[Detection] = []
     for result in results:
@@ -169,7 +253,11 @@ async def predict(file: UploadFile = File(...)) -> PredictResponse:
         for box in result.boxes:
             x1, y1, x2, y2 = (round(float(v), 2) for v in box.xyxy[0].tolist())
             class_id = int(box.cls[0])
-            if box.conf[0] > CONF_THRESHOLD:
+            # `conf=` above already filters, but keep the guard against this
+            # request's threshold rather than the process default — otherwise a
+            # slider set below CONF_THRESHOLD would drop the very detections it
+            # was lowered to reveal.
+            if float(box.conf[0]) >= eff_conf:
                 detections.append(
                     Detection(
                         label=names.get(class_id, str(class_id)),
@@ -179,12 +267,26 @@ async def predict(file: UploadFile = File(...)) -> PredictResponse:
                 )
 
     detections.sort(key=lambda d: d.confidence, reverse=True)
-    logger.info("%s -> %d detection(s)", file.filename, len(detections))
+    logger.info(
+        "%s -> %d detection(s) in %.1f ms (conf=%.2f iou=%.2f imgsz=%d)",
+        file.filename,
+        len(detections),
+        inference_ms,
+        eff_conf,
+        eff_iou,
+        eff_imgsz,
+    )
 
     return PredictResponse(
         detections=detections,
         image_width=image.width,
         image_height=image.height,
+        conf_threshold=eff_conf,
+        iou_threshold=eff_iou,
+        imgsz=eff_imgsz,
+        model=MODEL_PATH.name,
+        classes=list(model.names.values()),
+        inference_ms=round(inference_ms, 1),
     )
 
 

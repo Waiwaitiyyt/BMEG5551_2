@@ -1,161 +1,811 @@
-// Frontend logic for the Implant Loosening Detection demo (BMEG5552).
+// Implant Locator workstation — BMEG5552.
 //
-// API contract:
+// Three panes, one shared study list:
+//   queue    a client-side session queue; nothing is persisted server-side
+//   viewer   the active study with the model's box drawn over it
+//   findings the parsed response plus the knobs that shape the next run
 //
-//   POST {API_BASE_URL}/predict
-//   Content-Type: multipart/form-data, field name "file"
+// API contract
+// ------------
+//   GET  {API}/health
+//     -> { status, model_path, model_name, classes, conf_threshold,
+//          iou_threshold, imgsz, device }
 //
-//   Response JSON:
-//   {
-//     "detections": [
-//       { "label": "Implant", "confidence": 0.94, "box": [x1, y1, x2, y2] }
-//     ],
-//     "image_width": 1024,   // px — original image the box coords refer to
-//     "image_height": 768    // px
-//   }
+//   POST {API}/predict     multipart/form-data
+//     file  the image           (required)
+//     conf  0 < conf <= 1       (optional, defaults to the server's setting)
+//     iou   0 < iou  <= 1       (optional)
+//     imgsz 64..1536, /32       (optional)
+//     -> { detections: [{ label, confidence, box: [x1,y1,x2,y2] }],
+//          image_width, image_height,
+//          conf_threshold, iou_threshold, imgsz, model, classes, inference_ms }
 //
-//   box: [x1, y1, x2, y2] in pixel coordinates of the original uploaded image
-//   (top-left / bottom-right corners).
+//   box coordinates are pixels in the original uploaded image (top-left /
+//   bottom-right), which is what drawOverlays() positions against.
 //
-// When the page is served by the Express gateway (server/ts, port 3000) the
-// requests go to the same origin under /api, which Express proxies to the
-// FastAPI inference server. Opening index.html straight from disk (file://)
-// has no origin to inherit, so it falls back to FastAPI on localhost:8000 —
-// that path needs the FastAPI CORS settings to allow it.
+// Served by the Express gateway (server/ts, :3000) the calls go to /api on the
+// same origin and Express proxies them to FastAPI. Opened straight from disk
+// there is no origin to inherit, so it falls back to FastAPI on :8000 — that
+// path needs the FastAPI CORS settings to allow it.
 
-const API_BASE_URL =
-    window.location.protocol === "file:" ? "http://localhost:8000" : "/api";
-const PREDICT_ENDPOINT = `${API_BASE_URL}/predict`;
+const IS_FILE = window.location.protocol === "file:";
+const API_BASE = IS_FILE ? "http://localhost:8000" : "/api";
+const PREDICT_ENDPOINT = `${API_BASE}/predict`;
+const HEALTH_ENDPOINT = `${API_BASE}/health`;
+const GATEWAY_HEALTH = IS_FILE ? null : "/healthz";
+const HEALTH_INTERVAL_MS = 15000;
 
-const dropzone = document.getElementById("dropzone");
-const fileInput = document.getElementById("file-input");
-const dropzoneEmpty = document.getElementById("dropzone-empty");
-const imageStage = document.getElementById("image-stage");
-const previewImage = document.getElementById("preview-image");
-const overlayCanvas = document.getElementById("overlay-canvas");
+const $ = (id) => document.getElementById(id);
 
-const uploadMeta = document.getElementById("upload-meta");
-const fileNameEl = document.getElementById("file-name");
-const fileDimsEl = document.getElementById("file-dims");
+const el = {
+    chipModel: $("chip-model"),
+    dotApi: $("dot-api"), chipApi: $("chip-api"),
+    dotWeb: $("dot-web"), chipWeb: $("chip-web"),
 
-const analyzeBtn = document.getElementById("analyze-btn");
-const resetBtn = document.getElementById("reset-btn");
+    queueList: $("queue-list"),
+    queueBlank: $("queue-blank"),
+    queueCount: $("queue-count"),
+    queueFilter: $("queue-filter"),
+    queueAdd: $("queue-add"),
+    fileInput: $("file-input"),
 
-const statusPill = document.getElementById("status-pill");
-const resultsEmpty = document.getElementById("results-empty");
-const resultsError = document.getElementById("results-error");
-const errorMessage = document.getElementById("error-message");
-const resultsContent = document.getElementById("results-content");
-const detectionList = document.getElementById("detection-list");
+    stage: $("viewer-stage"),
+    stageEmpty: $("stage-empty"),
+    stageFrames: $("stage-frames"),
+    framePrior: $("frame-prior"),
+    frameInner: $("frame-inner"),
+    viewerImage: $("viewer-image"),
+    viewerOverlays: $("viewer-overlays"),
+    priorImage: $("prior-image"),
+    priorOverlays: $("prior-overlays"),
+    priorTag: $("prior-tag"),
+    currentTag: $("current-tag"),
+    overlaySeg: $("overlay-seg"),
+    compareBtn: $("compare-btn"),
+    zoomReadout: $("zoom-readout"),
 
-let currentObjectUrl = null;
-let currentFile = null;
-let lastDetections = null;
+    cornerTl: $("corner-tl"), cornerTr: $("corner-tr"),
+    cornerBl: $("corner-bl"), cornerBr: $("corner-br"),
 
-const BOX_COLOR = "#ff5a5f";
+    steps: $("steps"),
+    runBtn: $("run-btn"),
+    clearBtn: $("clear-btn"),
+
+    statusPill: $("status-pill"),
+    detCards: $("det-cards"),
+    findingsNote: $("findings-note"),
+
+    confRange: $("conf-range"), confOut: $("conf-out"),
+    confTick: $("conf-tick"), confHint: $("conf-hint"),
+    iouRange: $("iou-range"), iouOut: $("iou-out"),
+    windowRange: $("window-range"), levelRange: $("level-range"), wlOut: $("wl-out"),
+
+    metaCkpt: $("meta-ckpt"), metaImgsz: $("meta-imgsz"),
+    metaClasses: $("meta-classes"), metaLatency: $("meta-latency"),
+    metaEndpoint: $("meta-endpoint"),
+
+    rawBlock: $("raw-block"), rawReq: $("raw-req"),
+    rawStatus: $("raw-status"), rawBody: $("raw-body"),
+    exportBtn: $("export-btn"),
+};
 
 // ---------------------------------------------------------------------
-// Upload interactions
+// State
 // ---------------------------------------------------------------------
 
-dropzone.addEventListener("click", () => fileInput.click());
+/** @type {Array<Study>} studies in queue order (newest last) */
+const studies = [];
+let activeId = null;
+let priorId = null;          // the study shown beside the active one
+let nextId = 1;
 
-dropzone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        fileInput.click();
+const view = {
+    tool: "wl",              // wl | zoom | pan
+    overlay: "box",          // box | heat | both | off
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+    compare: false,
+};
+
+// Set once the reader moves a threshold slider; from then on the sliders win
+// over whatever /health reports as the server-side default.
+let touchedConf = false;
+let touchedIou = false;
+
+const server = {
+    online: false,
+    imgsz: 640,
+    classes: [],
+    modelName: null,
+    modelPath: null,
+};
+
+// ---------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const fmt2 = (v) => Number(v).toFixed(2);
+const pct = (v) => `${Math.round((v ?? 0) * 100)}%`;
+
+function activeStudy() {
+    return studies.find((s) => s.id === activeId) ?? null;
+}
+
+function priorStudy() {
+    return studies.find((s) => s.id === priorId) ?? null;
+}
+
+/** The most recent finished study that is not the active one. */
+function findPriorCandidate() {
+    for (let i = studies.length - 1; i >= 0; i -= 1) {
+        const s = studies[i];
+        if (s.id !== activeId && s.status === "done") return s;
     }
-});
+    return null;
+}
 
-["dragenter", "dragover"].forEach((eventName) => {
-    dropzone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropzone.classList.add("is-dragover");
-    });
-});
+function setText(node, value) {
+    if (node.textContent !== value) node.textContent = value;
+}
 
-["dragleave", "dragend"].forEach((eventName) => {
-    dropzone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropzone.classList.remove("is-dragover");
-    });
-});
+// ---------------------------------------------------------------------
+// Health — drives the two service chips in the top bar
+// ---------------------------------------------------------------------
 
-dropzone.addEventListener("drop", (event) => {
-    event.preventDefault();
-    dropzone.classList.remove("is-dragover");
-    const file = event.dataTransfer.files?.[0];
-    if (file) handleFile(file);
-});
+async function pollHealth() {
+    try {
+        const res = await fetch(HEALTH_ENDPOINT, { cache: "no-store" });
+        if (!res.ok) throw new Error(String(res.status));
+        const data = await res.json();
 
-fileInput.addEventListener("change", () => {
-    const file = fileInput.files?.[0];
-    if (file) handleFile(file);
-});
+        server.online = data.status === "ok";
+        server.imgsz = data.imgsz ?? server.imgsz;
+        server.classes = Array.isArray(data.classes) ? data.classes : [];
+        server.modelPath = data.model_path ?? null;
+        server.modelName = data.model_name ?? basename(data.model_path);
 
-resetBtn.addEventListener("click", resetAll);
-analyzeBtn.addEventListener("click", runDetection);
+        el.dotApi.className = `dot ${server.online ? "is-up" : "is-wait"}`;
+        setText(el.chipApi, `FastAPI ${server.online ? "ready" : "loading"}`);
+        setText(el.chipModel, `${server.modelName ?? "—"} · YOLO`);
 
-window.addEventListener("resize", () => {
-    if (!imageStage.hidden) {
-        resizeCanvasToImage();
-        if (lastDetections) drawDetections(lastDetections);
+        // Only adopt the server's thresholds until the reader touches a slider;
+        // after that the sliders are the source of truth for the next run.
+        if (!touchedConf && typeof data.conf_threshold === "number") {
+            el.confRange.value = String(data.conf_threshold);
+        }
+        if (!touchedIou && typeof data.iou_threshold === "number") {
+            el.iouRange.value = String(data.iou_threshold);
+        }
+        renderControls();
+        renderMeta();
+    } catch {
+        server.online = false;
+        el.dotApi.className = "dot is-down";
+        setText(el.chipApi, "FastAPI offline");
     }
-});
+
+    if (GATEWAY_HEALTH) {
+        try {
+            const res = await fetch(GATEWAY_HEALTH, { cache: "no-store" });
+            el.dotWeb.className = `dot ${res.ok ? "is-up" : "is-down"}`;
+            setText(el.chipWeb, res.ok ? "Express ready" : "Express error");
+        } catch {
+            el.dotWeb.className = "dot is-down";
+            setText(el.chipWeb, "Express offline");
+        }
+    } else {
+        el.dotWeb.className = "dot";
+        setText(el.chipWeb, "direct (file://)");
+    }
+}
+
+function basename(p) {
+    if (!p) return null;
+    const parts = String(p).split(/[\\/]/);
+    return parts[parts.length - 1] || null;
+}
+
+/** "…/server/py/weights/best.pt" -> "weights/best.pt" — the checkpoint's
+ *  absolute path is too long for the metadata column and says nothing useful. */
+function shortPath(p) {
+    if (!p) return null;
+    const parts = String(p).split(/[\\/]/).filter(Boolean);
+    return parts.slice(-2).join("/") || null;
+}
 
 // ---------------------------------------------------------------------
-// File handling
+// Queue
 // ---------------------------------------------------------------------
 
-function handleFile(file) {
-    if (!file.type.startsWith("image/")) {
-        showError("That file doesn't look like an image. Please choose a PNG, JPEG, or WEBP X-ray.");
+function addFiles(fileList) {
+    const files = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+    if (files.length === 0) {
+        noteError("Those files don't look like images. Use PNG, JPEG, or WEBP.");
         return;
     }
 
-    clearResults();
+    let firstAdded = null;
+    files.forEach((file) => {
+        const study = {
+            id: nextId++,
+            file,
+            url: URL.createObjectURL(file),
+            name: file.name,
+            width: 0,
+            height: 0,
+            kind: (file.type.split("/")[1] || "img").toUpperCase(),
+            status: "queued",
+            detections: null,
+            response: null,
+            error: null,
+            latencyMs: null,
+        };
+        studies.push(study);
+        if (firstAdded === null) firstAdded = study.id;
 
-    if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-    currentFile = file;
-    currentObjectUrl = URL.createObjectURL(file);
+        // The natural size is only known once the browser has decoded it.
+        const probe = new Image();
+        probe.onload = () => {
+            study.width = probe.naturalWidth;
+            study.height = probe.naturalHeight;
+            renderQueue();
+            if (study.id === activeId) { renderViewer(); renderCorners(); }
+        };
+        probe.src = study.url;
+    });
 
-    previewImage.onload = () => {
-        dropzone.classList.add("has-image");
-        dropzoneEmpty.hidden = true;
-        imageStage.hidden = false;
-
-        uploadMeta.hidden = false;
-        fileNameEl.textContent = file.name;
-        fileDimsEl.textContent = `${previewImage.naturalWidth} × ${previewImage.naturalHeight}px`;
-
-        resizeCanvasToImage();
-
-        analyzeBtn.disabled = false;
-        resetBtn.disabled = false;
-    };
-    previewImage.src = currentObjectUrl;
+    selectStudy(firstAdded);
+    renderAll();
 }
 
-function resetAll() {
-    if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
-    currentObjectUrl = null;
-    currentFile = null;
-    lastDetections = null;
+function selectStudy(id) {
+    if (activeId === id) return;
+    activeId = id;
+    resetTransform();
 
-    fileInput.value = "";
-    previewImage.src = "";
-    dropzone.classList.remove("has-image");
-    dropzoneEmpty.hidden = false;
-    imageStage.hidden = true;
-    uploadMeta.hidden = true;
+    // Keep whatever finished study was last on screen as the compare target.
+    priorId = findPriorCandidate()?.id ?? null;
+    if (!priorId) view.compare = false;
 
-    const ctx = overlayCanvas.getContext("2d");
-    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    renderAll();
+}
 
-    analyzeBtn.disabled = true;
-    resetBtn.disabled = true;
+function removeStudy(id) {
+    const idx = studies.findIndex((s) => s.id === id);
+    if (idx === -1) return;
+    URL.revokeObjectURL(studies[idx].url);
+    studies.splice(idx, 1);
 
-    clearResults();
+    if (activeId === id) {
+        activeId = studies[Math.min(idx, studies.length - 1)]?.id ?? null;
+        resetTransform();
+    }
+    if (priorId === id) priorId = null;
+    priorId = priorId ?? findPriorCandidate()?.id ?? null;
+    if (!priorId) view.compare = false;
+
+    renderAll();
+}
+
+function clearActive() {
+    if (activeId !== null) removeStudy(activeId);
+}
+
+function renderQueue() {
+    const needle = el.queueFilter.value.trim().toLowerCase();
+    const visible = needle
+        ? studies.filter((s) => s.name.toLowerCase().includes(needle))
+        : studies;
+
+    setText(el.queueCount, String(studies.length));
+    el.queueList.replaceChildren();
+
+    visible.forEach((study) => {
+        const li = document.createElement("li");
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `queue-item${study.id === activeId ? " is-active" : ""}`;
+        btn.setAttribute("aria-current", study.id === activeId ? "true" : "false");
+        btn.addEventListener("click", () => selectStudy(study.id));
+
+        const thumb = document.createElement("span");
+        thumb.className = "queue-thumb";
+        const img = document.createElement("img");
+        img.src = study.url;
+        img.alt = "";
+        thumb.appendChild(img);
+
+        const body = document.createElement("span");
+        body.className = "queue-body";
+
+        const name = document.createElement("span");
+        name.className = "queue-name";
+        name.textContent = study.name;
+        name.title = study.name;
+
+        const sub = document.createElement("span");
+        sub.className = "queue-sub";
+        sub.textContent = study.width
+            ? `${study.width} × ${study.height} · ${study.kind}`
+            : study.kind;
+
+        body.append(name, sub);
+        btn.append(thumb, body, queueMarker(study));
+        li.appendChild(btn);
+        el.queueList.appendChild(li);
+    });
+
+    el.queueBlank.hidden = studies.length > 0;
+    if (studies.length > 0 && visible.length === 0) {
+        el.queueBlank.hidden = false;
+        el.queueBlank.textContent = `No study matches "${el.queueFilter.value.trim()}".`;
+    } else {
+        el.queueBlank.textContent =
+            "No studies yet. Drop X-ray images below, or anywhere on the window, to build a queue.";
+    }
+}
+
+/** Confidence figure for a hit, a state pill for everything else. */
+function queueMarker(study) {
+    if (study.status === "done" && study.detections?.length) {
+        const span = document.createElement("span");
+        span.className = "queue-conf";
+        span.textContent = pct(study.detections[0].confidence);
+        return span;
+    }
+
+    const pill = document.createElement("span");
+    pill.className = "queue-pill";
+    if (study.status === "running") { pill.classList.add("is-running"); pill.textContent = "running"; }
+    else if (study.status === "error") { pill.classList.add("is-error"); pill.textContent = "error"; }
+    else if (study.status === "done") { pill.classList.add("is-none"); pill.textContent = "none"; }
+    else pill.textContent = "queued";
+    return pill;
+}
+
+// ---------------------------------------------------------------------
+// Viewer
+// ---------------------------------------------------------------------
+
+function renderViewer() {
+    const study = activeStudy();
+
+    el.stageEmpty.hidden = !!study;
+    el.stageFrames.hidden = !study;
+    if (!study) {
+        el.viewerImage.removeAttribute("src");
+        el.viewerOverlays.replaceChildren();
+        return;
+    }
+
+    if (el.viewerImage.getAttribute("src") !== study.url) {
+        el.viewerImage.src = study.url;
+        el.viewerImage.alt = `X-ray under review: ${study.name}`;
+    }
+
+    const prior = view.compare ? priorStudy() : null;
+    el.stageFrames.classList.toggle("is-compare", !!prior);
+    el.stage.classList.toggle("is-compare", !!prior);
+    el.framePrior.hidden = !prior;
+    el.currentTag.hidden = !prior;
+
+    if (prior) {
+        if (el.priorImage.getAttribute("src") !== prior.url) el.priorImage.src = prior.url;
+        el.priorImage.alt = `Previously analysed X-ray: ${prior.name}`;
+        el.priorTag.innerHTML = "";
+        el.priorTag.append(bold("PRIOR"), br(), text(prior.name), br(),
+            text(`${prior.width} × ${prior.height} px`));
+        el.currentTag.innerHTML = "";
+        el.currentTag.append(bold("CURRENT"), br(), text(study.name), br(),
+            text(`${study.width} × ${study.height} px`));
+    }
+
+    applyWindowLevel();
+    applyTransform();
+    fitFrames();
+    drawOverlays(el.viewerOverlays, study, false);
+    drawOverlays(el.priorOverlays, prior, true);
+}
+
+const text = (t) => document.createTextNode(t);
+const br = () => document.createElement("br");
+function bold(t) { const b = document.createElement("b"); b.textContent = t; return b; }
+
+/**
+ * Size each .frame-inner to the contain-fit rectangle of its image inside the
+ * frame. Doing it here rather than in CSS means the overlays, positioned in
+ * percentages of that box, stay pinned to the right pixels at any size, and a
+ * small 331 px study still fills the viewer the way the design shows it.
+ */
+function fitFrames() {
+    fitOne(el.frameInner, activeStudy());
+    if (view.compare) fitOne(el.priorImage.parentElement, priorStudy());
+}
+
+function fitOne(inner, study) {
+    if (!inner || !study || !study.width || !study.height) return;
+    const frame = inner.parentElement;
+    const style = getComputedStyle(frame);
+    const availW = frame.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const availH = frame.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+    if (availW <= 0 || availH <= 0) return;
+
+    const scale = Math.min(availW / study.width, availH / study.height);
+    inner.style.width = `${Math.round(study.width * scale)}px`;
+    inner.style.height = `${Math.round(study.height * scale)}px`;
+}
+
+/**
+ * Draw the model's boxes over one frame. `study.detections[i].box` is
+ * [x1, y1, x2, y2] in the original image's pixels, so every edge becomes a
+ * percentage of the image box and rides along with the zoom/pan transform.
+ */
+function drawOverlays(container, study, secondary) {
+    if (!container) return;
+    container.replaceChildren();
+    if (!study || view.overlay === "off") return;
+    if (study.status !== "done" || !study.detections?.length) return;
+
+    const W = study.response?.image_width || study.width;
+    const H = study.response?.image_height || study.height;
+    if (!W || !H) return;
+
+    const wantBox = view.overlay === "box" || view.overlay === "both";
+    const wantHeat = view.overlay === "heat" || view.overlay === "both";
+
+    study.detections.forEach((det, i) => {
+        const [x1, y1, x2, y2] = det.box;
+        const rect = {
+            left: `${(x1 / W) * 100}%`,
+            top: `${(y1 / H) * 100}%`,
+            width: `${((x2 - x1) / W) * 100}%`,
+            height: `${((y2 - y1) / H) * 100}%`,
+        };
+
+        if (wantHeat) {
+            const heat = document.createElement("div");
+            heat.className = "det-heat";
+            Object.assign(heat.style, rect);
+            container.appendChild(heat);
+        }
+
+        if (!wantBox) return;
+
+        if (secondary) {
+            const dashed = document.createElement("div");
+            dashed.className = "dash-box";
+            Object.assign(dashed.style, rect);
+            container.appendChild(dashed);
+            return;
+        }
+
+        const box = document.createElement("div");
+        box.className = `det-box${i > 0 ? " is-secondary" : ""}`;
+        Object.assign(box.style, rect);
+        for (let c = 0; c < 4; c += 1) box.appendChild(document.createElement("i"));
+
+        const label = document.createElement("span");
+        label.className = "det-label";
+        label.textContent = `${det.label ?? "implant"} · ${fmt2(det.confidence)}`;
+        box.appendChild(label);
+
+        container.appendChild(box);
+    });
+}
+
+// --- window / level, zoom, pan ----------------------------------------
+
+/**
+ * Window/level as a CSS filter. With `brightness(b) contrast(c)` the output is
+ * (in·b − 0.5)·c + 0.5, so contrast = 255/window sets the slope and
+ * brightness = 127.5/level puts the chosen level at mid-grey. Display only —
+ * the bytes posted to the model are always the untouched original file.
+ */
+function applyWindowLevel() {
+    const win = Number(el.windowRange.value);
+    const level = Math.max(1, Number(el.levelRange.value));
+    const filter = `brightness(${(127.5 / level).toFixed(3)}) contrast(${(255 / win).toFixed(3)})`;
+    el.viewerImage.style.filter = filter;
+    el.priorImage.style.filter = filter;
+}
+
+function applyTransform() {
+    const t = `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`;
+    el.frameInner.style.transform = t;
+    el.priorImage.parentElement.style.transform = t;
+    setText(el.zoomReadout, `${Math.round(view.zoom * 100)}%`);
+}
+
+function resetTransform() {
+    view.zoom = 1;
+    view.panX = 0;
+    view.panY = 0;
+}
+
+function setTool(tool) {
+    view.tool = tool;
+    ["wl", "zoom", "pan"].forEach((t) => el.stage.classList.toggle(`tool-${t}`, t === tool));
+    document.querySelectorAll(".tool[data-tool]").forEach((btn) => {
+        const on = btn.dataset.tool === tool;
+        btn.classList.toggle("is-on", on);
+        btn.setAttribute("aria-pressed", String(on));
+    });
+}
+
+function setOverlay(mode) {
+    view.overlay = mode;
+    el.overlaySeg.querySelectorAll("button").forEach((btn) => {
+        const on = btn.dataset.overlay === mode;
+        btn.classList.toggle("is-on", on);
+        btn.setAttribute("aria-pressed", String(on));
+    });
+    drawOverlays(el.viewerOverlays, activeStudy(), false);
+    drawOverlays(el.priorOverlays, view.compare ? priorStudy() : null, true);
+    renderControls();
+}
+
+// ---------------------------------------------------------------------
+// Corner annotations
+// ---------------------------------------------------------------------
+
+function renderCorners() {
+    const study = activeStudy();
+    if (!study) {
+        [el.cornerTl, el.cornerTr, el.cornerBl, el.cornerBr].forEach((n) => setText(n, ""));
+        return;
+    }
+
+    const idx = studies.indexOf(study) + 1;
+    const dims = study.width ? `${study.width} × ${study.height} px · ${study.kind}` : study.kind;
+    setText(el.cornerTl, `${study.name}\n${dims}`);
+    setText(el.cornerTr, `STUDY ${idx} / ${studies.length}\n${statusLabel(study).toUpperCase()}`);
+    setText(el.cornerBl,
+        `W ${el.windowRange.value}   L ${el.levelRange.value}\nZOOM ${Math.round(view.zoom * 100)}%`);
+
+    const r = study.response;
+    const imgsz = r?.imgsz ?? server.imgsz;
+    const conf = r?.conf_threshold ?? Number(el.confRange.value);
+    const iou = r?.iou_threshold ?? Number(el.iouRange.value);
+    setText(el.cornerBr,
+        `imgsz ${imgsz} · conf ${fmt2(conf)} · iou ${fmt2(iou)}\nPOST ${PREDICT_ENDPOINT}`);
+}
+
+function statusLabel(study) {
+    if (!study) return "idle";
+    if (study.status === "running") return "analysing";
+    if (study.status === "error") return "error";
+    if (study.status === "done") return study.detections?.length ? "detected" : "no detection";
+    return "queued";
+}
+
+// ---------------------------------------------------------------------
+// Findings pane
+// ---------------------------------------------------------------------
+
+function renderFindings() {
+    const study = activeStudy();
+
+    // status pill
+    el.statusPill.className = "status-pill";
+    if (!study) setText(el.statusPill, "Idle");
+    else if (study.status === "running") { el.statusPill.classList.add("is-busy"); setText(el.statusPill, "Analysing…"); }
+    else if (study.status === "error") { el.statusPill.classList.add("is-bad"); setText(el.statusPill, "Error"); }
+    else if (study.status === "done" && study.detections?.length) { el.statusPill.classList.add("is-ok"); setText(el.statusPill, "Detected"); }
+    else if (study.status === "done") { el.statusPill.classList.add("is-bad"); setText(el.statusPill, "No detection"); }
+    else setText(el.statusPill, "Queued");
+
+    // detection cards
+    el.detCards.replaceChildren();
+    const dets = study?.status === "done" ? (study.detections ?? []) : [];
+    dets.forEach((det) => el.detCards.appendChild(detectionCard(det)));
+
+    // the note that stands in for cards when there is nothing to show
+    el.findingsNote.className = "findings-note";
+    if (dets.length) {
+        el.findingsNote.hidden = true;
+    } else {
+        el.findingsNote.hidden = false;
+        if (!study) {
+            el.findingsNote.textContent =
+                "Select or drop a study, then run detection to see the implant bounding box and confidence here.";
+        } else if (study.status === "error") {
+            el.findingsNote.classList.add("is-error");
+            el.findingsNote.textContent = study.error;
+        } else if (study.status === "running") {
+            el.findingsNote.textContent = "Running YOLO inference on the uploaded pixels…";
+        } else if (study.status === "done") {
+            el.findingsNote.textContent =
+                `No implant scored above the ${fmt2(study.response?.conf_threshold ?? 0)} confidence threshold. ` +
+                "Lower the threshold and re-run to see weaker candidates.";
+        } else {
+            el.findingsNote.textContent = "Ready. Run detection to locate the implant in this study.";
+        }
+    }
+
+    renderControls();
+    renderMeta();
+    renderRaw();
+
+    el.exportBtn.disabled = !study?.response;
+}
+
+function detectionCard(det) {
+    const [x1, y1, x2, y2] = det.box;
+    const conf = det.confidence ?? 0;
+
+    const card = document.createElement("div");
+    card.className = "det-card";
+
+    const head = document.createElement("div");
+    head.className = "det-card-head";
+
+    const name = document.createElement("span");
+    name.className = "det-name";
+    const swatch = document.createElement("span");
+    swatch.className = "det-swatch";
+    name.append(swatch, text(det.label ?? "implant"));
+
+    const value = document.createElement("span");
+    value.className = "det-conf";
+    value.textContent = fmt2(conf);
+
+    head.append(name, value);
+
+    const bar = document.createElement("div");
+    bar.className = "det-bar";
+    const fill = document.createElement("span");
+    fill.style.width = `${clamp(conf * 100, 0, 100)}%`;
+    bar.appendChild(fill);
+
+    const coords = document.createElement("div");
+    coords.className = "det-coords";
+    [["x1", x1], ["y1", y1], ["x2", x2], ["y2", y2]].forEach(([key, v]) => {
+        const cell = document.createElement("div");
+        const b = document.createElement("b");
+        b.textContent = String(Math.round(v));
+        const s = document.createElement("span");
+        s.textContent = key;
+        cell.append(b, s);
+        coords.appendChild(cell);
+    });
+
+    card.append(head, bar, coords);
+    return card;
+}
+
+function renderControls() {
+    const conf = Number(el.confRange.value);
+    const iou = Number(el.iouRange.value);
+    setText(el.confOut, fmt2(conf));
+    setText(el.iouOut, fmt2(iou));
+    setText(el.wlOut, `${el.windowRange.value} / ${el.levelRange.value}`);
+
+    paintTrack(el.confRange, "var(--color-accent-600)");
+    paintTrack(el.iouRange, "var(--color-accent-700)");
+    paintTrack(el.windowRange, "var(--color-accent-600)");
+    paintTrack(el.levelRange, "var(--color-neutral-700)");
+
+    // Tick showing where the current top detection sits on the threshold track.
+    const top = activeStudy()?.detections?.[0]?.confidence;
+    if (typeof top === "number") {
+        el.confTick.hidden = false;
+        el.confTick.style.left = thumbOffset(el.confRange, top);
+        setText(el.confHint, `Tick marks the current detection at ${fmt2(top)}.`);
+    } else {
+        el.confTick.hidden = true;
+        setText(el.confHint, "Sent to the model on the next run.");
+    }
+}
+
+/** Fraction of the way along a range input's travel, in CSS units. */
+function thumbOffset(input, value) {
+    const min = Number(input.min);
+    const max = Number(input.max);
+    const f = clamp((value - min) / (max - min), 0, 1);
+    return `calc(${f} * (100% - 13px) + 6.5px)`;
+}
+
+/**
+ * Chromium has no ::-moz-range-progress, so the filled part of the track is
+ * painted into the track's own background from here.
+ */
+function paintTrack(input, color) {
+    const min = Number(input.min);
+    const max = Number(input.max);
+    const f = clamp((Number(input.value) - min) / (max - min), 0, 1) * 100;
+    input.parentElement.style.setProperty("--fill", color);
+    input.style.setProperty(
+        "--track-bg",
+        `linear-gradient(90deg, ${color} 0 ${f}%, var(--color-neutral-900) ${f}% 100%)`,
+    );
+}
+
+function renderMeta() {
+    const r = activeStudy()?.response;
+    setText(el.metaCkpt, shortPath(server.modelPath) ?? r?.model ?? "—");
+    setText(el.metaImgsz, String(r?.imgsz ?? server.imgsz ?? "—"));
+
+    const classes = r?.classes ?? server.classes;
+    setText(el.metaClasses, classes?.length ? `${classes.length} · ${classes.join(", ")}` : "—");
+
+    const ms = activeStudy()?.latencyMs;
+    setText(el.metaLatency, ms == null ? "—" : `${Math.round(ms)} ms`);
+    setText(el.metaEndpoint, PREDICT_ENDPOINT);
+}
+
+function renderRaw() {
+    const study = activeStudy();
+    if (!study || (!study.response && study.status !== "error")) {
+        el.rawBlock.hidden = true;
+        return;
+    }
+    el.rawBlock.hidden = false;
+    setText(el.rawReq, `POST ${PREDICT_ENDPOINT}`);
+
+    if (study.response) {
+        el.rawStatus.className = "raw-status";
+        setText(el.rawStatus, String(study.httpStatus ?? 200));
+        setText(el.rawBody, JSON.stringify(study.response, null, 2));
+    } else {
+        el.rawStatus.className = "raw-status is-bad";
+        setText(el.rawStatus, String(study.httpStatus ?? "—"));
+        setText(el.rawBody, study.error ?? "");
+    }
+}
+
+// ---------------------------------------------------------------------
+// Pipeline steps + action buttons
+// ---------------------------------------------------------------------
+
+function renderSteps() {
+    const study = activeStudy();
+    let active = 1;
+    if (study && study.status === "done" && study.detections) active = 3;
+    else if (study) active = 2;
+
+    el.steps.querySelectorAll(".step").forEach((node) => {
+        const n = Number(node.dataset.step);
+        node.classList.toggle("is-done", n < active);
+        node.classList.toggle("is-active", n === active);
+    });
+}
+
+function renderActions() {
+    const study = activeStudy();
+    const busy = study?.status === "running";
+
+    el.clearBtn.disabled = !study || busy;
+    el.runBtn.disabled = !study || busy;
+
+    const label = el.runBtn.querySelector(".btn-label");
+    const spinner = el.runBtn.querySelector(".spinner");
+    if (busy && !spinner) el.runBtn.prepend(Object.assign(document.createElement("span"), { className: "spinner" }));
+    if (!busy && spinner) spinner.remove();
+    label.textContent = busy
+        ? "Detecting…"
+        : (study?.response ? "Re-run detection" : "Run detection");
+
+    const candidate = findPriorCandidate();
+    el.compareBtn.disabled = !candidate || !study;
+    el.compareBtn.classList.toggle("is-on", view.compare && !!candidate);
+}
+
+function renderAll() {
+    renderQueue();
+    renderViewer();
+    renderCorners();
+    renderFindings();
+    renderSteps();
+    renderActions();
+}
+
+function noteError(message) {
+    el.findingsNote.hidden = false;
+    el.findingsNote.className = "findings-note is-error";
+    el.findingsNote.textContent = message;
 }
 
 // ---------------------------------------------------------------------
@@ -163,186 +813,226 @@ function resetAll() {
 // ---------------------------------------------------------------------
 
 async function runDetection() {
-    if (!currentFile) return;
+    const study = activeStudy();
+    if (!study || study.status === "running") return;
 
-    setStatus("loading");
-    analyzeBtn.disabled = true;
-    analyzeBtn.classList.add("is-loading");
-    resetBtn.disabled = true;
+    const conf = Number(el.confRange.value);
+    const iou = Number(el.iouRange.value);
 
-    resultsEmpty.hidden = true;
-    resultsError.hidden = true;
-    resultsContent.hidden = true;
+    study.status = "running";
+    study.error = null;
+    renderAll();
 
+    const started = performance.now();
     try {
-        const formData = new FormData();
-        formData.append("file", currentFile);
+        const form = new FormData();
+        form.append("file", study.file);
+        form.append("conf", String(conf));
+        form.append("iou", String(iou));
 
-        const response = await fetch(PREDICT_ENDPOINT, {
-            method: "POST",
-            body: formData,
-        });
+        const res = await fetch(PREDICT_ENDPOINT, { method: "POST", body: form });
+        study.httpStatus = res.status;
 
-        if (!response.ok) {
-            throw new Error(`Server responded with ${response.status} ${response.statusText}`);
+        if (!res.ok) {
+            const detail = await res.json().catch(() => null);
+            throw new Error(detail?.detail ?? `Server responded with ${res.status} ${res.statusText}`);
         }
 
-        const data = await response.json();
-        const detections = Array.isArray(data.detections) ? data.detections : [];
+        const data = await res.json();
+        study.response = data;
+        study.detections = Array.isArray(data.detections) ? data.detections : [];
+        study.latencyMs = data.inference_ms ?? (performance.now() - started);
+        study.status = "done";
 
-        lastDetections = {
-            items: detections,
-            imageWidth: data.image_width || previewImage.naturalWidth,
-            imageHeight: data.image_height || previewImage.naturalHeight,
-        };
-
-        renderDetections(lastDetections);
-        drawDetections(lastDetections);
-        setStatus(detections.length ? "success" : "idle", detections.length ? undefined : "No implant detected");
+        // The just-finished study becomes the compare target for the next one.
+        priorId = findPriorCandidate()?.id ?? null;
     } catch (err) {
+        study.status = "error";
+        study.response = null;
+        study.detections = null;
+        study.error = server.online || study.httpStatus
+            ? String(err.message)
+            : `Could not reach the detection server at ${PREDICT_ENDPOINT}. ` +
+              "Start it with ./start.sh (FastAPI on :8000, Express on :3000).";
         console.error(err);
-        setStatus("error");
-        showError(
-            `Could not reach the detection server at ${PREDICT_ENDPOINT}. ` +
-            `Make sure the FastAPI backend is running, and that API_BASE_URL in app.js points to it. ` +
-            `(${err.message})`
-        );
-    } finally {
-        analyzeBtn.disabled = false;
-        analyzeBtn.classList.remove("is-loading");
-        resetBtn.disabled = false;
-    }
-}
-
-// ---------------------------------------------------------------------
-// Canvas overlay
-// ---------------------------------------------------------------------
-
-function resizeCanvasToImage() {
-    const width = previewImage.clientWidth;
-    const height = previewImage.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
-
-    overlayCanvas.style.width = `${width}px`;
-    overlayCanvas.style.height = `${height}px`;
-    overlayCanvas.width = Math.round(width * dpr);
-    overlayCanvas.height = Math.round(height * dpr);
-
-    const ctx = overlayCanvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
-
-function drawDetections(result) {
-    const ctx = overlayCanvas.getContext("2d");
-    const width = previewImage.clientWidth;
-    const height = previewImage.clientHeight;
-    ctx.clearRect(0, 0, width, height);
-
-    const scaleX = width / result.imageWidth;
-    const scaleY = height / result.imageHeight;
-
-    result.items.forEach((detection) => {
-        const [x1, y1, x2, y2] = detection.box;
-        const bx = x1 * scaleX;
-        const by = y1 * scaleY;
-        const bw = (x2 - x1) * scaleX;
-        const bh = (y2 - y1) * scaleY;
-
-        ctx.lineWidth = 2.5;
-        ctx.strokeStyle = BOX_COLOR;
-        ctx.strokeRect(bx, by, bw, bh);
-
-        const label = `${detection.label ?? "implant"} ${formatConfidence(detection.confidence)}`;
-        ctx.font = "600 12px Inter, sans-serif";
-        const textWidth = ctx.measureText(label).width;
-        const tagHeight = 18;
-        const tagY = by > tagHeight ? by - tagHeight : by;
-
-        ctx.fillStyle = BOX_COLOR;
-        ctx.fillRect(bx, tagY, textWidth + 12, tagHeight);
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText(label, bx + 6, tagY + 13);
-    });
-}
-
-// ---------------------------------------------------------------------
-// Results panel
-// ---------------------------------------------------------------------
-
-function renderDetections(result) {
-    detectionList.innerHTML = "";
-
-    if (result.items.length === 0) {
-        resultsEmpty.hidden = false;
-        resultsEmpty.querySelector("p").textContent = "No implant was detected in this image.";
-        resultsContent.hidden = true;
-        return;
     }
 
-    result.items.forEach((detection) => {
-        const [x1, y1, x2, y2] = detection.box;
-        const confidencePct = Math.round((detection.confidence ?? 0) * 100);
-
-        const card = document.createElement("div");
-        card.className = "detection-card";
-        card.innerHTML = `
-            <div class="detection-card-head">
-                <span class="detection-label">${escapeHtml(detection.label ?? "implant")}</span>
-                <span class="confidence-value">${confidencePct}%</span>
-            </div>
-            <div class="confidence-bar">
-                <div class="confidence-bar-fill" style="width: ${confidencePct}%"></div>
-            </div>
-            <div class="detection-coords">
-                <span><b>${Math.round(x1)}</b>x1</span>
-                <span><b>${Math.round(y1)}</b>y1</span>
-                <span><b>${Math.round(x2)}</b>x2</span>
-                <span><b>${Math.round(y2)}</b>y2</span>
-            </div>
-        `;
-        detectionList.appendChild(card);
-    });
-
-    resultsEmpty.hidden = true;
-    resultsContent.hidden = false;
+    renderAll();
 }
 
-function clearResults() {
-    lastDetections = null;
-    resultsEmpty.hidden = false;
-    resultsEmpty.querySelector("p").textContent =
-        "Upload an X-ray and run detection to see the implant bounding box and confidence score here.";
-    resultsError.hidden = true;
-    resultsContent.hidden = true;
-    detectionList.innerHTML = "";
-    setStatus("idle");
-}
+function exportJson() {
+    const study = activeStudy();
+    if (!study?.response) return;
 
-function showError(message) {
-    resultsEmpty.hidden = true;
-    resultsContent.hidden = true;
-    resultsError.hidden = false;
-    errorMessage.textContent = message;
-}
-
-function setStatus(state, label) {
-    const labels = {
-        idle: "Idle",
-        loading: "Analyzing…",
-        success: "Detected",
-        error: "Error",
+    const payload = {
+        file: study.name,
+        image_width: study.response.image_width,
+        image_height: study.response.image_height,
+        requested: { conf: Number(el.confRange.value), iou: Number(el.iouRange.value) },
+        response: study.response,
     };
-    statusPill.className = `status-pill status-${state}`;
-    statusPill.textContent = label ?? labels[state];
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${study.name.replace(/\.[^.]+$/, "")}-detection.json`;
+    a.click();
+    URL.revokeObjectURL(url);
 }
 
-function formatConfidence(value) {
-    if (typeof value !== "number") return "";
-    return `${Math.round(value * 100)}%`;
-}
+// ---------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------
 
-function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-}
+el.queueAdd.addEventListener("click", () => el.fileInput.click());
+el.fileInput.addEventListener("change", () => {
+    if (el.fileInput.files?.length) addFiles(el.fileInput.files);
+    el.fileInput.value = "";
+});
+el.queueFilter.addEventListener("input", renderQueue);
+
+// Drops land anywhere on the window, not only on the queue's dashed target.
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragDepth += 1;
+    document.body.classList.add("is-dragover");
+});
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) document.body.classList.remove("is-dragover");
+});
+window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    document.body.classList.remove("is-dragover");
+    if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+});
+
+document.querySelectorAll(".tool[data-tool]").forEach((btn) => {
+    btn.addEventListener("click", () => setTool(btn.dataset.tool));
+});
+
+el.overlaySeg.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-overlay]");
+    if (btn) setOverlay(btn.dataset.overlay);
+});
+
+el.compareBtn.addEventListener("click", () => {
+    const candidate = findPriorCandidate();
+    if (!candidate) return;
+    priorId = candidate.id;
+    view.compare = !view.compare;
+    renderViewer();
+    renderActions();
+});
+
+el.zoomReadout.addEventListener("click", () => {
+    resetTransform();
+    applyTransform();
+    renderCorners();
+});
+
+el.runBtn.addEventListener("click", runDetection);
+el.clearBtn.addEventListener("click", clearActive);
+el.exportBtn.addEventListener("click", exportJson);
+
+[el.confRange, el.iouRange].forEach((input) => {
+    input.addEventListener("input", () => {
+        if (input === el.confRange) touchedConf = true;
+        if (input === el.iouRange) touchedIou = true;
+        renderControls();
+        renderCorners();
+    });
+});
+
+[el.windowRange, el.levelRange].forEach((input) => {
+    input.addEventListener("input", () => {
+        applyWindowLevel();
+        renderControls();
+        renderCorners();
+    });
+});
+
+// --- pointer tools on the stage ---------------------------------------
+
+let drag = null;
+
+el.stage.addEventListener("pointerdown", (e) => {
+    if (!activeStudy() || e.button !== 0) return;
+    drag = {
+        x: e.clientX,
+        y: e.clientY,
+        zoom: view.zoom,
+        panX: view.panX,
+        panY: view.panY,
+        win: Number(el.windowRange.value),
+        level: Number(el.levelRange.value),
+    };
+    el.stage.setPointerCapture(e.pointerId);
+    el.stage.classList.add("is-dragging");
+});
+
+el.stage.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+
+    if (view.tool === "pan") {
+        view.panX = drag.panX + dx;
+        view.panY = drag.panY + dy;
+        applyTransform();
+    } else if (view.tool === "zoom") {
+        view.zoom = clamp(drag.zoom * Math.exp(-dy / 220), 0.2, 8);
+        applyTransform();
+    } else {
+        // Window/level, the radiology convention: horizontal widens the
+        // window, vertical shifts the level.
+        el.windowRange.value = String(clamp(drag.win + dx, 20, 480));
+        el.levelRange.value = String(clamp(drag.level - dy, 0, 255));
+        applyWindowLevel();
+        renderControls();
+    }
+    renderCorners();
+});
+
+["pointerup", "pointercancel"].forEach((type) => {
+    el.stage.addEventListener(type, (e) => {
+        drag = null;
+        el.stage.classList.remove("is-dragging");
+        if (el.stage.hasPointerCapture?.(e.pointerId)) el.stage.releasePointerCapture(e.pointerId);
+    });
+});
+
+el.stage.addEventListener("wheel", (e) => {
+    if (!activeStudy()) return;
+    e.preventDefault();
+    view.zoom = clamp(view.zoom * Math.exp(-e.deltaY / 500), 0.2, 8);
+    applyTransform();
+    renderCorners();
+}, { passive: false });
+
+window.addEventListener("resize", () => {
+    fitFrames();
+    renderCorners();
+});
+
+window.addEventListener("beforeunload", () => {
+    studies.forEach((s) => URL.revokeObjectURL(s.url));
+});
+
+// ---------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------
+
+setTool("wl");
+setOverlay("box");
+applyWindowLevel();
+applyTransform();
+renderAll();
+
+pollHealth();
+setInterval(pollHealth, HEALTH_INTERVAL_MS);
