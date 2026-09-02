@@ -19,6 +19,7 @@
 #   API_HOST / API_PORT        FastAPI bind address   (default 127.0.0.1:8000)
 #   WEB_HOST / WEB_PORT        Express bind address   (default 127.0.0.1:3000)
 #   MODEL_PATH                 YOLO checkpoint        (default server/py/weights/best.pt)
+#   CLASSIFIER_PATH            ResNet50 checkpoint    (default server/py/weights/classifier.pt)
 #   DEVICE                     "cpu", "0", "0,1", ... (default: ultralytics picks)
 
 set -euo pipefail
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
     --api-only) START_WEB=0 ;;
     --web-only) START_API=0 ;;
     --dev)      NPM_SCRIPT="dev" ;;
-    -h|--help)  sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^#\s\?//'; exit 0 ;;
+    -h|--help)  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^#\s\?//'; exit 0 ;;
     *) echo "Unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
@@ -70,10 +71,21 @@ prefix() {
 if [[ $START_API -eq 1 ]]; then
   command -v uv >/dev/null 2>&1 || fail "uv is not installed. Run ./setup.sh, or see https://astral.sh/uv"
   MODEL_PATH="${MODEL_PATH:-$PY_DIR/weights/best.pt}"
-  [[ -f "$MODEL_PATH" ]] || fail "model checkpoint not found: $MODEL_PATH
+  [[ -f "$MODEL_PATH" ]] || fail "detector checkpoint not found: $MODEL_PATH
        Train one with tools/train.py, then copy runs/detect/implant/weights/best.pt
        to server/py/weights/best.pt (or set MODEL_PATH)."
   export MODEL_PATH
+
+  # The classifier is optional: without it localisation still works and
+  # /classify answers 503, so this warns rather than aborting the launch.
+  CLASSIFIER_PATH="${CLASSIFIER_PATH:-$PY_DIR/weights/classifier.pt}"
+  if [[ -f "$CLASSIFIER_PATH" ]]; then
+    export CLASSIFIER_PATH
+  else
+    echo "${C_ERR}warning:${C_OFF} classifier checkpoint not found: $CLASSIFIER_PATH" >&2
+    echo "         Prediction and heat map will be unavailable; localisation still works." >&2
+    echo "         Copy resnet50_models/fold1/best.pt there, or set CLASSIFIER_PATH." >&2
+  fi
 fi
 
 if [[ $START_WEB -eq 1 ]]; then

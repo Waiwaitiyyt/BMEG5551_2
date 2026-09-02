@@ -1,7 +1,15 @@
-"""FastAPI inference server for implant localisation (BMEG5552 demo prototype).
+"""FastAPI inference server for the BMEG5552 implant workstation.
 
-Loads the trained YOLO checkpoint once at startup and exposes the two
-endpoints the workstation frontend uses:
+Two models are loaded once at startup and serve the frontend's three features:
+
+    localisation   YOLO detector    -> POST /predict    (bounding box)
+    prediction     ResNet50 CNN     -> POST /classify   (loose vs. well fixed)
+    heat map       Grad-CAM         -> POST /classify   (returned with the call)
+
+Prediction and its heat map share one endpoint because the viewer's overlay
+switch (Box / Heatmap / Both / Off) is a display toggle, not a new run: one
+upload yields the probability and the saliency map together, and flipping the
+switch never costs another request.
 
     GET  /health
     ->  {
@@ -12,8 +20,42 @@ endpoints the workstation frontend uses:
           "conf_threshold": 0.5,
           "iou_threshold": 0.7,
           "imgsz": 640,
-          "device": "cpu"
+          "device": "cpu",
+          "classifier": {
+            "available": true,
+            "model_name": "classifier.pt",
+            "arch": "resnet50",
+            "classes": ["Control", "Loose"],
+            "threshold": 0.6132,
+            "img_size": 320,
+            "val_metrics": {...}
+          }
         }
+
+    POST /classify  multipart/form-data
+        file       the image                              (required)
+        threshold  per-request decision threshold         (optional, 0 < t < 1)
+        heatmap    compute the Grad-CAM overlay           (optional, default true)
+    ->  {
+          "label": "Loose",
+          "probability": 0.9971,          # p(Loose), threshold free
+          "confidence": 0.9971,           # probability of the reported label
+          "threshold": 0.6132,
+          "classes": ["Control", "Loose"],
+          "heatmap": "data:image/png;base64,...",   # null when heatmap=false
+          "heatmap_box": [20.0, 20.0, 311.0, 311.0],
+          "image_width": 331,
+          "image_height": 331,
+          "model": "classifier.pt",
+          "arch": "resnet50",
+          "imgsz": 320,
+          "inference_ms": 498.2
+        }
+
+    The heat map is an RGBA PNG the size of the upload, transparent outside the
+    centre crop the model actually saw, so the frontend can stretch it over the
+    image at natural size with no coordinate maths. `heatmap_box` reports that
+    crop in source pixels for anyone who wants to draw its outline.
 
     POST /predict   multipart/form-data
         file    the image                          (required)
@@ -79,6 +121,9 @@ def _env_int(name: str, default: int) -> int:
 
 # --- Configuration (override with environment variables) ------------------
 MODEL_PATH = Path(os.environ.get("MODEL_PATH", BASE_DIR / "weights" / "best.pt"))
+CLASSIFIER_PATH = Path(
+    os.environ.get("CLASSIFIER_PATH", BASE_DIR / "weights" / "classifier.pt")
+)
 CONF_THRESHOLD = _env_float("CONF_THRESHOLD", 0.5)
 IOU_THRESHOLD = _env_float("IOU_THRESHOLD", 0.7)
 IMGSZ = _env_int("IMGSZ", 640)
@@ -98,13 +143,29 @@ MAX_IMGSZ = 1536
 IMGSZ_STRIDE = 32
 
 # Loaded during the lifespan startup hook.
-state: dict[str, Any] = {"model": None}
+state: dict[str, Any] = {"model": None, "classifier": None}
 
 
 class Detection(BaseModel):
     label: str
     confidence: float
     box: list[float]
+
+
+class ClassifyResponse(BaseModel):
+    label: str
+    probability: float
+    confidence: float
+    threshold: float
+    classes: list[str]
+    heatmap: str | None
+    heatmap_box: list[float] | None
+    image_width: int
+    image_height: int
+    model: str
+    arch: str
+    imgsz: int
+    inference_ms: float
 
 
 class PredictResponse(BaseModel):
@@ -160,9 +221,34 @@ async def lifespan(app: FastAPI):
     if DEVICE:
         model.to(DEVICE)
     state["model"] = model
-    logger.info("Model ready. Classes: %s", model.names)
+    logger.info("Detector ready. Classes: %s", model.names)
+
+    # The classifier is optional: a missing checkpoint degrades /classify to a
+    # 503 but leaves localisation working, which keeps the demo usable on a
+    # machine where only the YOLO weights were copied over.
+    if CLASSIFIER_PATH.is_file():
+        from classifier import LooseningClassifier
+
+        logger.info("Loading loosening classifier from %s", CLASSIFIER_PATH)
+        classifier = LooseningClassifier(CLASSIFIER_PATH, device=DEVICE)
+        state["classifier"] = classifier
+        logger.info(
+            "Classifier ready. arch=%s classes=%s threshold=%.4f device=%s",
+            classifier.arch,
+            classifier.class_names,
+            classifier.threshold,
+            classifier.device,
+        )
+    else:
+        logger.warning(
+            "Classifier checkpoint not found at %s - /classify will return 503. "
+            "Copy resnet50_models/fold1/best.pt there, or set CLASSIFIER_PATH.",
+            CLASSIFIER_PATH,
+        )
+
     yield
     state["model"] = None
+    state["classifier"] = None
 
 
 app = FastAPI(
@@ -181,10 +267,32 @@ app.add_middleware(
 )
 
 
+async def _read_image(file: UploadFile) -> Image.Image:
+    """Decode an upload into a PIL image, or raise the right 4xx for the frontend."""
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image is larger than the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+        )
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image.load()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not decode the upload as an image. Use PNG, JPEG, or WEBP.",
+        ) from exc
+    return image
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     """Liveness plus the defaults the frontend seeds its controls from."""
     model = state["model"]
+    classifier = state["classifier"]
     return {
         "status": "ok" if model is not None else "loading",
         "model_path": str(MODEL_PATH),
@@ -194,7 +302,74 @@ async def health() -> dict[str, Any]:
         "iou_threshold": IOU_THRESHOLD,
         "imgsz": IMGSZ,
         "device": DEVICE or "auto",
+        "classifier": (
+            {"available": True, **classifier.info()}
+            if classifier is not None
+            else {"available": False, "model_path": str(CLASSIFIER_PATH)}
+        ),
     }
+
+
+@app.post("/classify", response_model=ClassifyResponse)
+async def classify(
+    file: UploadFile = File(...),
+    threshold: float | None = Form(None),
+    heatmap: bool = Form(True),
+) -> ClassifyResponse:
+    """Loose vs. well-fixed, with the Grad-CAM overlay that explains the call."""
+    classifier = state["classifier"]
+    if classifier is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Classifier checkpoint not loaded ({CLASSIFIER_PATH}). "
+                "Copy resnet50_models/fold1/best.pt to server/py/weights/classifier.pt."
+            ),
+        )
+    # A threshold of exactly 0 or 1 collapses the decision to one class, which
+    # is never what a slider drag means.
+    if threshold is not None and not 0.0 < threshold < 1.0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"threshold must be strictly between 0 and 1 (got {threshold}).",
+        )
+
+    image = await _read_image(file)
+
+    # Grad-CAM needs a backward pass, so this is real work, not a lookup; run it
+    # off the event loop to keep /health and concurrent uploads responsive.
+    from anyio import to_thread
+    from classifier import png_to_data_uri
+
+    result = await to_thread.run_sync(
+        lambda: classifier.classify(image, want_cam=heatmap, threshold=threshold)
+    )
+
+    logger.info(
+        "%s -> %s p=%.4f (thr=%.3f, heatmap=%s) in %.1f ms",
+        file.filename,
+        result.label,
+        result.probability,
+        result.threshold,
+        heatmap,
+        result.inference_ms,
+    )
+
+    return ClassifyResponse(
+        label=result.label,
+        probability=result.probability,
+        confidence=result.confidence,
+        threshold=result.threshold,
+        classes=classifier.class_names,
+        heatmap=png_to_data_uri(result.cam_png) if result.cam_png else None,
+        heatmap_box=result.cam_box,
+        image_width=image.width,
+        image_height=image.height,
+        model=CLASSIFIER_PATH.name,
+        arch=classifier.arch,
+        imgsz=classifier.img_size,
+        inference_ms=result.inference_ms,
+    )
 
 
 @app.post("/predict", response_model=PredictResponse)
@@ -215,23 +390,7 @@ async def predict(
     eff_iou = _validate_ratio("iou", iou, IOU_THRESHOLD)
     eff_imgsz = _validate_imgsz(imgsz)
 
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Image is larger than the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
-        )
-
-    try:
-        image = Image.open(io.BytesIO(raw))
-        image.load()
-    except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not decode the upload as an image. Use PNG, JPEG, or WEBP.",
-        ) from exc
+    image = await _read_image(file)
 
     # X-rays are usually greyscale or 16-bit; YOLO expects 3-channel 8-bit RGB.
     image = image.convert("RGB")

@@ -21,3 +21,9 @@ dataset/
 
 # Runtime logs from start.sh
 logs/
+
+# Kaggle API key
+kaggle.json
+
+# Model
+resnet50_models/

@@ -1,33 +1,40 @@
 # BMEG5552 — Implant Loosening Detection (Demo Prototype)
 
-This is the group project repository for **BMEG5552** at the **University of Western Australia**. The project demonstrates the first step of a software pipeline for detecting **aseptic loosening** of orthopaedic implants from X-ray images.
+This is the group project repository for **BMEG5552** at the **University of Western Australia**. The project demonstrates a software pipeline for detecting **aseptic loosening** of orthopaedic implants from X-ray images.
 
-> **Important:** This is a **demo prototype**. It focuses on locating the implant inside an X-ray image. The actual diagnosis of loosening is not implemented — this project shows what the full workflow *would* look like.
+> **Important:** This is a **demo prototype for educational purposes, not for clinical use.** The classifier is trained on 206 images from a single public database, which is far too small to support a clinical claim.
 
 ---
 
 ## What does this project do?
 
-1. **Locate the implant** in an X-ray image using a computer vision model (YOLO).
-2. **Display the result** on a web page — the original X-ray with a bounding box drawn around the implant.
+1. **Locate the implant** in an X-ray image using an object detection model (YOLO).
+2. **Predict loosening** — a ResNet50 CNN classifies the X-ray as *Loose* or *Well fixed* and reports the probability.
+3. **Explain the prediction** — a Grad-CAM heat map shows which region of the radiograph drove the classifier's decision.
+4. **Display everything** on a web page — the original X-ray with the bounding box, the verdict, and the heat map overlay.
 
-In a real clinical tool, the next step would be to analyse the region around the implant to detect loosening. This project builds the foundation for that pipeline.
+One click runs all three: the two model calls go out concurrently and settle
+independently, so a failure in one half still leaves the other's result on screen.
 
 ---
 
 ## How it works (high-level)
 
 ```
-X-ray Image  →  Frontend (web page)  →  Express gateway  →  FastAPI server  →  YOLO model  →  Bounding boxes (JSON)  →  Back to Frontend
-                     :3000                  :3000            :8000                ↑
-                                     serves the page      /api → /predict   trained on labelled data
+                                                       ┌─ YOLO ────────→ bounding box
+X-ray  →  Frontend  →  Express gateway  →  FastAPI  ───┤
+            :3000          :3000            :8000      └─ ResNet50 ────→ p(loose) + Grad-CAM
+                       serves the page,                                            │
+                       proxies /api/* ──────────────────────────────────────────── ↓
+                                                                        JSON back to the frontend
 ```
 
 1. **Get data** — Download X-ray images from Kaggle.
 2. **Label data** — Use Label Studio to draw boxes around the implants in each X-ray.
-3. **Train model** — Use Ultralytics (YOLO) to train an object detection model. The result is a `.pt` file.
-4. **Serve the model** — A FastAPI server loads the trained model, receives uploaded X-ray images, runs inference, and returns the image with the implant highlighted.
-5. **Show results** — A vanilla HTML/CSS/JS web page lets users upload an X-ray and see the result.
+3. **Train the detector** — Ultralytics (YOLO) trains an object detection model. The result is a `.pt` file.
+4. **Train the classifier** — `tools/implant_loosening/` trains a ResNet50 on the Control/Loose folders, on Colab. The result is another `.pt` file.
+5. **Serve both models** — A FastAPI server loads them once at startup and exposes `/predict` and `/classify`.
+6. **Show results** — A vanilla HTML/CSS/JS web page lets users upload an X-ray and see the box, the verdict, and the heat map.
 
 The Express (Node.js) server is the single origin the browser talks to: it serves
 the static frontend and proxies `/api/*` to FastAPI, so no CORS setup is needed.
@@ -46,12 +53,14 @@ nothing is written to disk.
 │   └── style.css            #   Page styles
 │
 ├── server/
-│   ├── py/                  # Python backend — FastAPI + YOLO inference
-│   │   ├── pyproject.toml   #   Python dependencies (FastAPI, Ultralytics)
+│   ├── py/                  # Python backend — FastAPI, YOLO + ResNet50 inference
+│   │   ├── pyproject.toml   #   Python dependencies (FastAPI, Ultralytics, torch)
 │   │   ├── .python-version  #   Python version (3.11+)
-│   │   ├── server.py        #   FastAPI app entrypoint
+│   │   ├── server.py        #   FastAPI app entrypoint (/predict, /classify, /health)
+│   │   ├── classifier.py    #   ResNet50 loosening classifier + Grad-CAM
 │   │   └── weights/
-│   │       └── best.pt      #   Trained YOLO checkpoint served by the API
+│   │       ├── best.pt      #   Trained YOLO checkpoint (localisation)
+│   │       └── classifier.pt #  Trained ResNet50 checkpoint (prediction + heat map)
 │   │
 │   └── ts/                  # TypeScript backend — Express gateway
 │       ├── package.json     #   Node dependencies (Express, http-proxy-middleware)
@@ -64,7 +73,17 @@ nothing is written to disk.
 │   ├── .python-version
 │   ├── fetch_dataset.py     #   Download X-ray datasets from Kaggle
 │   ├── prepare_dataset.py   #   Match Label Studio exports and split YOLO data
-│   └── train.py             #   Train the YOLO model
+│   ├── train.py             #   Train the YOLO detector
+│   └── implant_loosening/   #   Loosening classifier — see its own README
+│       ├── colab_train.ipynb #    Run this on Colab to train
+│       ├── train.py         #    5-fold CV training entry point
+│       ├── data.py          #    Splits, transforms, dataset discovery
+│       ├── model.py         #    torchvision backbones with a 1-logit head
+│       ├── engine.py        #    Train/eval loops, AMP, flip TTA
+│       ├── metrics.py       #    AUC, sensitivity/specificity, threshold search
+│       └── predict.py       #    CLI inference + Grad-CAM overlays
+│
+├── resnet50_models/         # Trained 5-fold classifier run (fold1 is deployed)
 │
 ├── .gitignore
 └── README.MD                # This file
@@ -278,6 +297,38 @@ resulting checkpoint to where the FastAPI server loads it from:
 cp runs/detect/implant/weights/best.pt server/py/weights/best.pt
 ```
 
+### Step 4b: Train the Loosening Classifier
+
+The classifier is a separate model with its own pipeline in
+`tools/implant_loosening/` — it learns from the Kaggle database's `Control/`
+and `Loose/` folders directly and needs no bounding-box labels. It is meant to
+be trained on Colab (see `tools/implant_loosening/README.md` for the full
+story):
+
+1. Open `tools/implant_loosening/colab_train.ipynb` in Colab.
+2. Set the runtime to a **T4 GPU**.
+3. Run the cells top to bottom — roughly 15 minutes for the defaults
+   (ResNet50, 320 px, 40 epochs, 5-fold cross-validation).
+
+The run writes `runs/<name>/fold<k>/best.pt` plus a `summary.json` holding
+per-fold validation metrics and held-out test results. Each checkpoint carries
+its own architecture, input size, and tuned decision threshold, so the server
+needs no configuration to load one.
+
+**The deployed model is `fold1`** — it had the highest *validation* AUC (0.993)
+of the five, which is why it was picked; on the held-out test set it reaches
+AUC 0.988, accuracy 0.976, sensitivity 0.955, specificity 1.000. The 5-model
+ensemble scores marginally lower here (AUC 0.986, accuracy 0.951) while costing
+5× the memory and latency, so a single fold is the better deployment.
+
+```bash
+cp resnet50_models/fold1/best.pt server/py/weights/classifier.pt
+```
+
+> Selecting a model by test-set score would be peeking. Fold 1 was chosen on
+> validation AUC, which is independent of the test split; the test numbers above
+> are reported, not optimised against.
+
 ### Step 5: Run the Servers
 
 Both servers run at the same time, in two separate terminals.
@@ -311,17 +362,25 @@ workstation:
 
 | Pane                   | What it does                                                                                                                                       |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Study queue** (left) | Drop one or many X-rays anywhere on the window to build a session queue. Each row shows its thumbnail, dimensions, and either its confidence or its state (`queued`, `running`, `none`, `error`). Filter by file name. Nothing is persisted server-side. |
-| **Viewer** (centre)    | The active study with the model's box drawn over it. Tools: **window/level**, **zoom**, **pan** — pick one, then drag on the image (the scroll wheel always zooms; click the zoom readout to reset). Overlay modes: **Box**, **Heatmap**, **Both**, **Off**. **Compare** opens a picker for choosing any two queued studies, then splits the viewer between them (A on the left, B on the right; B is the active study). |
-| **Findings** (right)   | Status, confidence bar and `xyxy` per detection, the **inference controls**, the run metadata, the raw JSON response, and **Export JSON**.          |
+| **Study queue** (left) | Drop one or many X-rays anywhere on the window to build a session queue. Each row shows its thumbnail, dimensions, and either its verdict (`loose 97%` / `fixed 100%`) or its state (`queued`, `running`, `none`, `error`). Filter by file name. Nothing is persisted server-side. |
+| **Viewer** (centre)    | The active study with the detector's box and the classifier's Grad-CAM drawn over it. Tools: **window/level**, **zoom**, **pan** — pick one, then drag on the image (the scroll wheel always zooms; click the zoom readout to reset). Overlay modes: **Box**, **Heatmap**, **Both**, **Off** — a display switch, not a re-run. **Compare** opens a picker for choosing any two queued studies, then splits the viewer between them (A on the left, B on the right; B is the active study). |
+| **Findings** (right)   | The loosening verdict with p(loose) and the decision threshold, then the confidence bar and `xyxy` per detection, the **inference controls**, the run metadata, both raw JSON responses, and **Export JSON**. |
 
-Two of the inference controls are sent to the model on the next run — the
-**confidence threshold** and the **IoU (NMS)** threshold. **Window/level** is a
-display-only adjustment: the bytes posted to the model are always the untouched
-original file.
+**Run analysis** fires both models at once. The verdict card is tinted by its
+own answer — red for loosening, green for well fixed — and reports the
+confidence in the label it gave, with p(loose) and the tuned threshold spelled
+out underneath so a marginal call is visible as one.
 
-> The **Heatmap** overlay is a confidence bloom drawn from the returned box, not
-> a model saliency map. The model returns boxes only.
+Two of the inference controls are sent to the detector on the next run — the
+**confidence threshold** and the **IoU (NMS)** threshold. They do not affect the
+classifier, which uses its own tuned threshold. **Window/level** is a
+display-only adjustment: the bytes posted to either model are always the
+untouched original file.
+
+> The **Heatmap** overlay is a real Grad-CAM saliency map from the ResNet50
+> classifier, not a decoration derived from the box. On confidently well-fixed
+> cases read it with care — Grad-CAM rescales per image, so a hot spot appears
+> even when the activation behind it is negligible.
 
 > Opening `public/index.html` directly from disk also works — `app.js` then falls
 > back to `http://localhost:8000` — but going through <http://localhost:3000> is
@@ -332,9 +391,15 @@ original file.
 ## API Reference
 
 The frontend calls the FastAPI server through the Express proxy: a request to
-`/api/predict` on port 3000 is forwarded to `/predict` on port 8000. Both routes
+`/api/predict` on port 3000 is forwarded to `/predict` on port 8000. All routes
 below therefore work at `http://localhost:3000/api/...` and at
 `http://localhost:8000/...` directly.
+
+| Route            | Feature       | Model            |
+| ---------------- | ------------- | ---------------- |
+| `POST /predict`  | localisation  | YOLO             |
+| `POST /classify` | prediction + heat map | ResNet50 + Grad-CAM |
+| `GET /health`    | status of both | —               |
 
 ### `POST /predict`
 
@@ -399,6 +464,78 @@ server agree.
 | 502    | Express could not reach FastAPI (inference server not running) |
 | 503    | FastAPI is up but the model has not finished loading           |
 
+### `POST /classify`
+
+Classifies one uploaded X-ray as loose or well fixed, and returns the Grad-CAM
+heat map that explains the call.
+
+**Request** — `multipart/form-data`:
+
+| Field       | Required | Range           | Purpose                                            |
+| ----------- | -------- | --------------- | -------------------------------------------------- |
+| `file`      | yes      | 25 MB max       | PNG, JPEG, WEBP, BMP, or TIFF                      |
+| `threshold` | no       | `0 < t < 1`     | Decision threshold for this request only           |
+| `heatmap`   | no       | `true`/`false`  | Compute the Grad-CAM overlay (default `true`)      |
+
+Omit `threshold` and the value tuned on validation data (0.6132) applies. Set
+`heatmap=false` to skip the backward pass — roughly 0.19 s instead of 0.50 s on
+CPU.
+
+```bash
+curl -X POST http://localhost:3000/api/classify \
+  -F "file=@dataset/images/val/loose (103).png"
+```
+
+**Response** — `200 OK`
+
+```json
+{
+  "label": "Loose",
+  "probability": 0.9743,
+  "confidence": 0.9743,
+  "threshold": 0.6132,
+  "classes": ["Control", "Loose"],
+  "heatmap": "data:image/png;base64,iVBORw0KGgo…",
+  "heatmap_box": [20.01, 20.01, 310.99, 310.99],
+  "image_width": 331,
+  "image_height": 331,
+  "model": "classifier.pt",
+  "arch": "resnet50",
+  "imgsz": 320,
+  "inference_ms": 498.2
+}
+```
+
+- `probability` is **p(Loose)** and is threshold free — report it rather than
+  the label alone, because 0.62 and 0.99 both read "Loose" and only one of them
+  deserves a second look.
+- `confidence` is the probability of whichever label was reported, so it is
+  `probability` for Loose and `1 - probability` for Control.
+- `heatmap` is an RGBA PNG data URI, the same pixel size as the upload and fully
+  transparent outside the region the classifier saw, so the frontend stretches
+  it over the image with no coordinate maths. It is `null` when `heatmap=false`.
+- `heatmap_box` is `[x1, y1, x2, y2]` of that region in source pixels: the model
+  resizes the short side by 1.14× and centre-crops to 320², so roughly the
+  central 88% of a square image is all it looks at.
+
+> **Reading the heat map.** Grad-CAM is renormalised per image, so a hot spot
+> appears even when the underlying activation is negligible. On a case scored
+> `Control` at p(loose) 0.002, the red region is the strongest evidence the model
+> could find *for* loosening — which is nearly none. It is a candidate, not a
+> finding. The UI says so on the verdict card.
+
+**Error responses** carry a `detail` string:
+
+| Status | Meaning                                                          |
+| ------ | ---------------------------------------------------------------- |
+| 400    | File was empty, or could not be decoded as an image              |
+| 413    | Image exceeded `MAX_UPLOAD_BYTES`                                |
+| 422    | The `file` field was missing, or `threshold` was outside `(0, 1)` |
+| 503    | The classifier checkpoint is not loaded — see `CLASSIFIER_PATH`   |
+
+A 503 here does not affect `/predict`: the classifier is optional, and
+localisation keeps working without it.
+
 ### `GET /health`
 
 Reports model status and the defaults the frontend seeds its controls from.
@@ -412,11 +549,24 @@ Reports model status and the defaults the frontend seeds its controls from.
   "conf_threshold": 0.5,
   "iou_threshold": 0.7,
   "imgsz": 640,
-  "device": "auto"
+  "device": "auto",
+  "classifier": {
+    "available": true,
+    "model_path": "/…/server/py/weights/classifier.pt",
+    "model_name": "classifier.pt",
+    "arch": "resnet50",
+    "img_size": 320,
+    "classes": ["Control", "Loose"],
+    "threshold": 0.6132,
+    "device": "cpu",
+    "val_metrics": { "accuracy": 0.9697, "auc": 0.9926, "sensitivity": 1.0, "specificity": 0.9333, "…": "…" }
+  }
 }
 ```
 
-`status` is `loading` until the checkpoint has finished loading. The page polls
+`classifier.available` is `false` when the checkpoint is missing; the object
+then carries only `available` and `model_path`. `status` is `loading` until the
+detector checkpoint has finished loading. The page polls
 this every 15 s to drive the service chips in its top bar, and seeds the two
 threshold sliders from it — until you move one, after which the sliders win.
 
@@ -432,7 +582,8 @@ port or point at a different checkpoint.
 
 | Variable           | Default              | Purpose                                     |
 | ------------------ | -------------------- | ------------------------------------------- |
-| `MODEL_PATH`       | `weights/best.pt`    | YOLO checkpoint to load                     |
+| `MODEL_PATH`       | `weights/best.pt`       | YOLO detector checkpoint to load            |
+| `CLASSIFIER_PATH`  | `weights/classifier.pt` | ResNet50 loosening checkpoint; `/classify` returns 503 if absent |
 | `CONF_THRESHOLD`   | `0.5`                | Default confidence, when `conf` is not sent |
 | `IOU_THRESHOLD`    | `0.7`                | Default NMS IoU, when `iou` is not sent     |
 | `IMGSZ`            | `640`                | Default inference size, when `imgsz` is not sent — match training |
@@ -467,7 +618,8 @@ DEVICE=0 CONF_THRESHOLD=0.5 uv run python server.py
   cd tools && uv run python fetch_dataset.py
   ```
 - **Datasets are git-ignored.** The `.gitignore` file excludes the `datasets/` and `dataset/` folders, so downloaded images are not committed to the repository.
-- **The trained checkpoint lives at `server/py/weights/best.pt`.** That is the default `MODEL_PATH`, so the FastAPI server finds it with no configuration. After retraining, copy the new `runs/detect/implant/weights/best.pt` over it.
+- **The trained checkpoints live in `server/py/weights/`.** `best.pt` is the YOLO detector (default `MODEL_PATH`) and `classifier.pt` is the ResNet50 (default `CLASSIFIER_PATH`), so the FastAPI server finds both with no configuration. After retraining, copy `runs/detect/implant/weights/best.pt` and `tools/implant_loosening/runs/<name>/fold1/best.pt` over them respectively.
+- **The classifier is optional at runtime.** Without `classifier.pt` the server still starts, localisation still works, and `/classify` answers 503 — the frontend then shows the box and an explanatory card in place of the verdict.
 - **Both servers must be running** for the web page to work. Express alone serves the page but every detection returns `502`; FastAPI alone answers on port 8000 but nothing serves the frontend.
 - This project is a **prototype for educational purposes**. It is not intended for clinical use.
 

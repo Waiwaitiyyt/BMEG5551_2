@@ -326,6 +326,26 @@ body {
 }
 .queue-item.is-active .queue-conf { font-weight: 600; color: var(--color-accent-300); }
 
+.queue-verdict {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    flex: none;
+    white-space: nowrap;
+    font-weight: 600;
+}
+.queue-verdict.is-loose {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
+}
+.queue-verdict.is-control {
+    background: var(--ok-bg);
+    color: var(--ok);
+    border: 1px solid var(--ok-border);
+}
+
 .queue-pill {
     font-family: var(--font-mono);
     font-size: 10.5px;
@@ -641,7 +661,7 @@ body.is-dragover .dropzone {
     will-change: transform;
 }
 
-.frame-inner img {
+.frame-inner > img {
     display: block;
     image-rendering: auto;
 }
@@ -649,11 +669,11 @@ body.is-dragover .dropzone {
 /* fitFrame() in app.js sizes .frame-inner to the contain-fit rectangle, so
    the image fills it exactly and the percentage-positioned overlays land on
    the right pixels at any viewport size. */
-.frame-inner img { width: 100%; height: 100%; }
+.frame-inner > img { width: 100%; height: 100%; }
 
 .frame-overlays { position: absolute; inset: 0; }
 
-.frame-left .frame-inner img { filter: grayscale(1) brightness(.82) !important; }
+.frame-left .frame-inner > img { filter: grayscale(1) brightness(.82) !important; }
 .frame-left { opacity: .92; }
 
 .frame-tag {
@@ -707,14 +727,19 @@ body.is-dragover .dropzone {
     white-space: nowrap;
 }
 
-/* Confidence bloom derived from the box itself — see drawOverlays() in app.js.
-   This is not a model saliency map, and the UI labels it as such. */
-.det-heat {
+/* Grad-CAM from the loosening classifier. The server returns an RGBA PNG the
+   size of the upload, already transparent outside the region the model saw, so
+   it sits edge to edge inside the frame and needs no positioning. Its alpha
+   channel is already graded on the server so only real activation is painted
+   and the radiograph stays readable underneath — no blend mode on top of that,
+   which would undo the grading. */
+.cam-heat {
     position: absolute;
-    background: radial-gradient(ellipse at 50% 62%,
-        rgba(181, 171, 252, .42), rgba(121, 108, 191, .16) 45%, rgba(0, 0, 0, 0) 72%);
-    mix-blend-mode: screen;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     pointer-events: none;
+    user-select: none;
 }
 
 .dash-box {
@@ -936,6 +961,70 @@ body.is-dragover .dropzone {
     font-family: var(--font-mono);
     font-size: 10.5px;
     color: var(--color-neutral-600);
+}
+
+/* — loosening verdict card — */
+
+.cls-slot:empty { display: none; }
+.cls-slot { display: block; margin-bottom: 10px; }
+
+/* The verdict is the first thing a reader looks for, so the card is tinted by
+   its own answer rather than by the neutral surface the detections use. */
+.cls-card.is-loose {
+    border-color: var(--danger-border);
+    background: linear-gradient(180deg, var(--danger-bg), var(--ws-raised) 70%);
+}
+.cls-card.is-control {
+    border-color: var(--ok-border);
+    background: linear-gradient(180deg, var(--ok-bg), var(--ws-raised) 70%);
+}
+.cls-card.is-error {
+    border-color: var(--danger-border);
+    background: var(--danger-bg);
+}
+.cls-card.is-loose .det-conf { color: var(--danger); }
+.cls-card.is-control .det-conf { color: var(--ok); }
+.cls-card.is-loose .cls-swatch { background: var(--danger); }
+.cls-card.is-control .cls-swatch { background: var(--ok); }
+
+.cls-bar { position: relative; overflow: visible; height: 7px; }
+.cls-bar span { border-radius: 999px; }
+.cls-card.is-loose .cls-bar span { background: linear-gradient(90deg, #7c2f34, var(--danger)); }
+.cls-card.is-control .cls-bar span { background: linear-gradient(90deg, #1d6b45, var(--ok)); }
+
+/* Tick marking the tuned decision threshold, so the margin of the call is
+   visible rather than implied. */
+.cls-thresh {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    background: var(--color-neutral-300);
+    border-radius: 1px;
+    transform: translateX(-1px);
+}
+
+.cls-legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding-top: 2px; }
+.cls-legend div { display: flex; flex-direction: column; min-width: 0; }
+.cls-legend b {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--color-neutral-200);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cls-legend span {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--color-neutral-600);
+}
+
+.cls-hint {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--color-neutral-500);
 }
 
 .findings-note {

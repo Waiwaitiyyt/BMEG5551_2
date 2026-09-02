@@ -5,12 +5,19 @@ description = "FastAPI inference server for implant localisation (BMEG5552)."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.121.2",
+    "numpy>=1.26",
     "opencv-python-headless>=4.12.0.88",
     "pillow>=11.3.0",
     "python-multipart>=0.0.20",
+    "torch>=2.2",
+    "torchvision>=0.17",
     "ultralytics>=8.4.115",
     "uvicorn[standard]>=0.38.0",
 ]
+
+# torch, torchvision and numpy arrive transitively with ultralytics, but the
+# loosening classifier in classifier.py imports all three directly, so they are
+# declared here rather than left to a transitive dependency that could change.
 
 # Ultralytics depends on `opencv-python`, whose wheels link against libGL — a
 # desktop GUI library that headless servers and slim containers do not ship.

@@ -1,15 +1,25 @@
-// Implant Locator workstation — BMEG5552.
+// Implant workstation — BMEG5552.
 //
 // Three panes, one shared study list:
 //   queue    a client-side session queue; nothing is persisted server-side
-//   viewer   the active study with the model's box drawn over it
-//   findings the parsed response plus the knobs that shape the next run
+//   viewer   the active study with the model's box and heat map drawn over it
+//   findings the parsed responses plus the knobs that shape the next run
+//
+// Three model-backed features, all driven by one "Run analysis" click:
+//   localisation  YOLO bounding box            POST /predict
+//   prediction    loose vs. well fixed         POST /classify
+//   heat map      Grad-CAM saliency            returned by the same /classify
+//
+// The two calls run concurrently and settle independently, so a classifier
+// that is missing or erroring still leaves localisation on screen.
 //
 // API contract
 // ------------
 //   GET  {API}/health
 //     -> { status, model_path, model_name, classes, conf_threshold,
-//          iou_threshold, imgsz, device }
+//          iou_threshold, imgsz, device,
+//          classifier: { available, model_name, arch, classes, threshold,
+//                        img_size, val_metrics } }
 //
 //   POST {API}/predict     multipart/form-data
 //     file  the image           (required)
@@ -20,8 +30,18 @@
 //          image_width, image_height,
 //          conf_threshold, iou_threshold, imgsz, model, classes, inference_ms }
 //
+//   POST {API}/classify    multipart/form-data
+//     file      the image        (required)
+//     threshold 0 < t < 1        (optional, defaults to the tuned value)
+//     heatmap   true | false     (optional, default true)
+//     -> { label, probability, confidence, threshold, classes,
+//          heatmap (PNG data URI or null), heatmap_box: [x1,y1,x2,y2],
+//          image_width, image_height, model, arch, imgsz, inference_ms }
+//
 //   box coordinates are pixels in the original uploaded image (top-left /
-//   bottom-right), which is what drawOverlays() positions against.
+//   bottom-right), which is what drawOverlays() positions against. The heat
+//   map arrives as a full-size RGBA PNG, transparent outside the centre crop
+//   the classifier saw, so it is simply stretched over the frame.
 //
 // Served by the Express gateway (server/ts, :3000) the calls go to /api on the
 // same origin and Express proxies them to FastAPI. Opened straight from disk
@@ -31,6 +51,7 @@
 const IS_FILE = window.location.protocol === "file:";
 const API_BASE = IS_FILE ? "http://localhost:8000" : "/api";
 const PREDICT_ENDPOINT = `${API_BASE}/predict`;
+const CLASSIFY_ENDPOINT = `${API_BASE}/classify`;
 const HEALTH_ENDPOINT = `${API_BASE}/health`;
 const GATEWAY_HEALTH = IS_FILE ? null : "/healthz";
 const HEALTH_INTERVAL_MS = 15000;
@@ -79,6 +100,7 @@ const el = {
     clearBtn: $("clear-btn"),
 
     statusPill: $("status-pill"),
+    clsSlot: $("cls-slot"),
     detCards: $("det-cards"),
     findingsNote: $("findings-note"),
 
@@ -87,12 +109,14 @@ const el = {
     iouRange: $("iou-range"), iouOut: $("iou-out"),
     windowRange: $("window-range"), levelRange: $("level-range"), wlOut: $("wl-out"),
 
-    metaCkpt: $("meta-ckpt"), metaImgsz: $("meta-imgsz"),
+    metaCkpt: $("meta-ckpt"), metaClsCkpt: $("meta-cls-ckpt"), metaImgsz: $("meta-imgsz"),
     metaClasses: $("meta-classes"), metaLatency: $("meta-latency"),
     metaEndpoint: $("meta-endpoint"),
 
     rawBlock: $("raw-block"), rawReq: $("raw-req"),
     rawStatus: $("raw-status"), rawBody: $("raw-body"),
+    rawClsBlock: $("raw-cls-block"), rawClsReq: $("raw-cls-req"),
+    rawClsStatus: $("raw-cls-status"), rawClsBody: $("raw-cls-body"),
     exportBtn: $("export-btn"),
 };
 
@@ -131,6 +155,9 @@ const server = {
     classes: [],
     modelName: null,
     modelPath: null,
+    // Mirror of /health.classifier — null until the first successful poll, and
+    // { available: false } when the checkpoint is not on the server.
+    classifier: null,
 };
 
 // ---------------------------------------------------------------------
@@ -196,10 +223,13 @@ async function pollHealth() {
         server.classes = Array.isArray(data.classes) ? data.classes : [];
         server.modelPath = data.model_path ?? null;
         server.modelName = data.model_name ?? basename(data.model_path);
+        server.classifier = data.classifier ?? null;
 
         el.dotApi.className = `dot ${server.online ? "is-up" : "is-wait"}`;
         setText(el.chipApi, `FastAPI ${server.online ? "ready" : "loading"}`);
-        setText(el.chipModel, `${server.modelName ?? "—"} · YOLO`);
+        setText(el.chipModel, server.classifier?.available
+            ? `YOLO + ${server.classifier.arch ?? "CNN"}`
+            : `${server.modelName ?? "—"} · YOLO`);
 
         // Only adopt the server's thresholds until the reader touches a slider;
         // after that the sliders are the source of truth for the next run.
@@ -272,6 +302,12 @@ function addFiles(fileList) {
             response: null,
             error: null,
             latencyMs: null,
+            // The classification half is tracked separately so one failing
+            // model never blanks the other's result.
+            classification: null,
+            classError: null,
+            classHttpStatus: null,
+            classLatencyMs: null,
         };
         studies.push(study);
         if (firstAdded === null) firstAdded = study.id;
@@ -380,6 +416,16 @@ function renderQueue() {
 
 /** Confidence figure for a hit, a state pill for everything else. */
 function queueMarker(study) {
+    // Scanning a worklist, the verdict beats the box confidence; the box is
+    // still shown when only the detector answered.
+    if (study.status === "done" && study.classification) {
+        const span = document.createElement("span");
+        const loose = study.classification.label === "Loose";
+        span.className = `queue-verdict ${loose ? "is-loose" : "is-control"}`;
+        span.textContent = `${loose ? "loose" : "fixed"} ${pct(study.classification.confidence)}`;
+        return span;
+    }
+
     if (study.status === "done" && study.detections?.length) {
         const span = document.createElement("span");
         span.className = "queue-conf";
@@ -469,22 +515,37 @@ function fitOne(inner, study) {
 }
 
 /**
- * Draw the model's boxes over one frame. `study.detections[i].box` is
- * [x1, y1, x2, y2] in the original image's pixels, so every edge becomes a
- * percentage of the image box and rides along with the zoom/pan transform.
+ * Draw the model output over one frame: the detector's boxes and the
+ * classifier's Grad-CAM.
+ *
+ * `study.detections[i].box` is [x1, y1, x2, y2] in the original image's pixels,
+ * so every edge becomes a percentage of the image box and rides along with the
+ * zoom/pan transform. The heat map needs no such maths — the server returns it
+ * already the size of the upload, transparent outside the region the classifier
+ * saw, so it is stretched edge to edge.
  */
 function drawOverlays(container, study, secondary) {
     if (!container) return;
     container.replaceChildren();
     if (!study || view.overlay === "off") return;
+
+    const wantBox = view.overlay === "box" || view.overlay === "both";
+    const wantHeat = view.overlay === "heat" || view.overlay === "both";
+
+    // Painted first so the boxes and labels stay legible on top of it.
+    if (wantHeat && study.classification?.heatmap) {
+        const heat = document.createElement("img");
+        heat.className = "cam-heat";
+        heat.src = study.classification.heatmap;
+        heat.alt = "";
+        container.appendChild(heat);
+    }
+
     if (study.status !== "done" || !study.detections?.length) return;
 
     const W = study.response?.image_width || study.width;
     const H = study.response?.image_height || study.height;
     if (!W || !H) return;
-
-    const wantBox = view.overlay === "box" || view.overlay === "both";
-    const wantHeat = view.overlay === "heat" || view.overlay === "both";
 
     study.detections.forEach((det, i) => {
         const [x1, y1, x2, y2] = det.box;
@@ -494,13 +555,6 @@ function drawOverlays(container, study, secondary) {
             width: `${((x2 - x1) / W) * 100}%`,
             height: `${((y2 - y1) / H) * 100}%`,
         };
-
-        if (wantHeat) {
-            const heat = document.createElement("div");
-            heat.className = "det-heat";
-            Object.assign(heat.style, rect);
-            container.appendChild(heat);
-        }
 
         if (!wantBox) return;
 
@@ -712,15 +766,20 @@ function renderCorners() {
     const imgsz = r?.imgsz ?? server.imgsz;
     const conf = r?.conf_threshold ?? Number(el.confRange.value);
     const iou = r?.iou_threshold ?? Number(el.iouRange.value);
+    const cls = study.classification;
+    const verdict = cls ? `${cls.label.toUpperCase()} p=${cls.probability.toFixed(3)}` : "not classified";
     setText(el.cornerBr,
-        `imgsz ${imgsz} · conf ${fmt2(conf)} · iou ${fmt2(iou)}\nPOST ${PREDICT_ENDPOINT}`);
+        `imgsz ${imgsz} · conf ${fmt2(conf)} · iou ${fmt2(iou)}\n${verdict}`);
 }
 
 function statusLabel(study) {
     if (!study) return "idle";
     if (study.status === "running") return "analysing";
     if (study.status === "error") return "error";
-    if (study.status === "done") return study.detections?.length ? "detected" : "no detection";
+    if (study.status === "done") {
+        if (study.classification) return study.classification.label.toLowerCase();
+        return study.detections?.length ? "detected" : "no detection";
+    }
     return "queued";
 }
 
@@ -733,12 +792,23 @@ function renderFindings() {
 
     // status pill
     el.statusPill.className = "status-pill";
+    const cls = study?.classification;
     if (!study) setText(el.statusPill, "Idle");
     else if (study.status === "running") { el.statusPill.classList.add("is-busy"); setText(el.statusPill, "Analysing…"); }
+    else if (study.status === "done" && cls) {
+        // The verdict is what a reader looks for first, so it owns the pill.
+        el.statusPill.classList.add(cls.label === "Loose" ? "is-bad" : "is-ok");
+        setText(el.statusPill, `${cls.label} · ${pct(cls.confidence)}`);
+    }
     else if (study.status === "error") { el.statusPill.classList.add("is-bad"); setText(el.statusPill, "Error"); }
     else if (study.status === "done" && study.detections?.length) { el.statusPill.classList.add("is-ok"); setText(el.statusPill, "Detected"); }
     else if (study.status === "done") { el.statusPill.classList.add("is-bad"); setText(el.statusPill, "No detection"); }
     else setText(el.statusPill, "Queued");
+
+    // classification card, above the detections it explains
+    el.clsSlot.replaceChildren();
+    if (cls) el.clsSlot.appendChild(classificationCard(cls, study));
+    else if (study?.classError) el.clsSlot.appendChild(classErrorCard(study.classError));
 
     // detection cards
     el.detCards.replaceChildren();
@@ -747,24 +817,25 @@ function renderFindings() {
 
     // the note that stands in for cards when there is nothing to show
     el.findingsNote.className = "findings-note";
-    if (dets.length) {
+    if (dets.length || cls) {
         el.findingsNote.hidden = true;
     } else {
         el.findingsNote.hidden = false;
         if (!study) {
             el.findingsNote.textContent =
-                "Select or drop a study, then run detection to see the implant bounding box and confidence here.";
+                "Select or drop a study, then run the analysis to see the implant bounding box, " +
+                "the loosening verdict, and the Grad-CAM heat map here.";
         } else if (study.status === "error") {
             el.findingsNote.classList.add("is-error");
             el.findingsNote.textContent = study.error;
         } else if (study.status === "running") {
-            el.findingsNote.textContent = "Running YOLO inference on the uploaded pixels…";
+            el.findingsNote.textContent = "Running detection and classification on the uploaded pixels…";
         } else if (study.status === "done") {
             el.findingsNote.textContent =
                 `No implant scored above the ${fmt2(study.response?.conf_threshold ?? 0)} confidence threshold. ` +
                 "Lower the threshold and re-run to see weaker candidates.";
         } else {
-            el.findingsNote.textContent = "Ready. Run detection to locate the implant in this study.";
+            el.findingsNote.textContent = "Ready. Run the analysis to locate and classify the implant in this study.";
         }
     }
 
@@ -772,7 +843,105 @@ function renderFindings() {
     renderMeta();
     renderRaw();
 
-    el.exportBtn.disabled = !study?.response;
+    el.exportBtn.disabled = !study?.response && !study?.classification;
+}
+
+/**
+ * The loosening verdict.
+ *
+ * p(Loose) is shown alongside the label because the label alone hides how
+ * close the call was: a 0.62 and a 0.99 both read "Loose", and only one of
+ * them is worth a second look. The tuned threshold is marked on the bar so it
+ * is visible how much margin the decision had.
+ */
+function classificationCard(cls, study) {
+    const loose = cls.label === "Loose";
+    const card = document.createElement("div");
+    card.className = `det-card cls-card ${loose ? "is-loose" : "is-control"}`;
+
+    const head = document.createElement("div");
+    head.className = "det-card-head";
+
+    const name = document.createElement("span");
+    name.className = "det-name";
+    const swatch = document.createElement("span");
+    swatch.className = "det-swatch cls-swatch";
+    name.append(swatch, document.createTextNode(loose ? "Aseptic loosening" : "Well fixed"));
+
+    const value = document.createElement("span");
+    value.className = "det-conf";
+    value.textContent = pct(cls.confidence);
+    value.title = `Confidence in "${cls.label}"`;
+    head.append(name, value);
+
+    const bar = document.createElement("div");
+    bar.className = "det-bar cls-bar";
+    bar.title = `p(loose) = ${cls.probability.toFixed(3)} on a 0-1 axis; the tick marks the ${fmt2(cls.threshold)} decision threshold`;
+    const fill = document.createElement("span");
+    fill.style.width = `${clamp(cls.probability, 0, 1) * 100}%`;
+    const mark = document.createElement("i");
+    mark.className = "cls-thresh";
+    mark.style.left = `${clamp(cls.threshold, 0, 1) * 100}%`;
+    mark.title = `Decision threshold ${fmt2(cls.threshold)}`;
+    bar.append(fill, mark);
+
+    const legend = document.createElement("div");
+    legend.className = "cls-legend";
+    // Three cells, not four: the architecture is already named in the run
+    // metadata below, and a fourth column truncated the values.
+    legend.append(
+        labelled("p(loose)", cls.probability.toFixed(3)),
+        labelled("threshold", fmt2(cls.threshold)),
+        labelled("latency", `${Math.round(study?.classLatencyMs ?? cls.inference_ms ?? 0)} ms`),
+    );
+
+    const hint = document.createElement("p");
+    hint.className = "cls-hint";
+    if (!cls.heatmap) {
+        hint.textContent = "Heat map was not requested for this run.";
+    } else if (loose) {
+        hint.textContent =
+            "Switch the overlay to Heatmap to see the Grad-CAM region that drove this call.";
+    } else {
+        // Grad-CAM is renormalised per image, so the map always has a hot spot
+        // even when the underlying activation is negligible. On a well-fixed
+        // implant that spot is the strongest evidence the model could find for
+        // loosening — which is near zero here, and is not a finding.
+        hint.textContent =
+            "Switch the overlay to Heatmap to see where the weak loosening evidence sat. " +
+            "Grad-CAM is rescaled per image, so a hot spot appears even at p(loose) " +
+            `${cls.probability.toFixed(3)} — read it as the model's best candidate, not a finding.`;
+    }
+
+    card.append(head, bar, legend, hint);
+    return card;
+}
+
+function labelled(term, value) {
+    const wrap = document.createElement("div");
+    const b = document.createElement("b");
+    b.textContent = value;
+    const span = document.createElement("span");
+    span.textContent = term;
+    wrap.append(b, span);
+    return wrap;
+}
+
+/** Shown when /classify failed but detection may still have succeeded. */
+function classErrorCard(message) {
+    const card = document.createElement("div");
+    card.className = "det-card cls-card is-error";
+    const head = document.createElement("div");
+    head.className = "det-card-head";
+    const name = document.createElement("span");
+    name.className = "det-name";
+    name.textContent = "Classification unavailable";
+    head.appendChild(name);
+    const body = document.createElement("p");
+    body.className = "cls-hint";
+    body.textContent = message;
+    card.append(head, body);
+    return card;
 }
 
 function detectionCard(det) {
@@ -867,35 +1036,71 @@ function paintTrack(input, color) {
 }
 
 function renderMeta() {
-    const r = activeStudy()?.response;
+    const study = activeStudy();
+    const r = study?.response;
+    const cls = study?.classification;
     setText(el.metaCkpt, shortPath(server.modelPath) ?? r?.model ?? "—");
-    setText(el.metaImgsz, String(r?.imgsz ?? server.imgsz ?? "—"));
 
-    const classes = r?.classes ?? server.classes;
-    setText(el.metaClasses, classes?.length ? `${classes.length} · ${classes.join(", ")}` : "—");
+    const clsInfo = server.classifier;
+    setText(el.metaClsCkpt, clsInfo?.available
+        ? `${shortPath(clsInfo.model_path) ?? clsInfo.model_name} · ${clsInfo.arch}`
+        : (clsInfo ? "not loaded" : "—"));
 
-    const ms = activeStudy()?.latencyMs;
-    setText(el.metaLatency, ms == null ? "—" : `${Math.round(ms)} ms`);
-    setText(el.metaEndpoint, PREDICT_ENDPOINT);
+    // Two models, two input sizes — showing one would misdescribe the other.
+    const sizes = [r?.imgsz ?? server.imgsz, cls?.imgsz ?? clsInfo?.img_size]
+        .filter((v) => v != null);
+    setText(el.metaImgsz, sizes.length ? [...new Set(sizes)].join(" · ") : "—");
+
+    const detClasses = r?.classes ?? server.classes ?? [];
+    const clsClasses = cls?.classes ?? clsInfo?.classes ?? [];
+    const allClasses = [...detClasses, ...clsClasses];
+    setText(el.metaClasses, allClasses.length
+        ? `${allClasses.length} · ${allClasses.join(", ")}`
+        : "—");
+
+    // The wall-clock cost of a run is the slower of two concurrent calls.
+    const parts = [study?.latencyMs, study?.classLatencyMs].filter((v) => v != null);
+    setText(el.metaLatency, parts.length ? `${Math.round(Math.max(...parts))} ms` : "—");
+    setText(el.metaEndpoint, `${PREDICT_ENDPOINT} + ${CLASSIFY_ENDPOINT}`);
 }
 
 function renderRaw() {
     const study = activeStudy();
-    if (!study || (!study.response && study.status !== "error")) {
-        el.rawBlock.hidden = true;
-        return;
-    }
-    el.rawBlock.hidden = false;
-    setText(el.rawReq, `POST ${PREDICT_ENDPOINT}`);
 
-    if (study.response) {
-        el.rawStatus.className = "raw-status";
-        setText(el.rawStatus, String(study.httpStatus ?? 200));
-        setText(el.rawBody, JSON.stringify(study.response, null, 2));
-    } else {
-        el.rawStatus.className = "raw-status is-bad";
-        setText(el.rawStatus, String(study.httpStatus ?? "—"));
-        setText(el.rawBody, study.error ?? "");
+    const showDetect = study && (study.response || study.status === "error");
+    el.rawBlock.hidden = !showDetect;
+    if (showDetect) {
+        setText(el.rawReq, `POST ${PREDICT_ENDPOINT}`);
+        if (study.response) {
+            el.rawStatus.className = "raw-status";
+            setText(el.rawStatus, String(study.httpStatus ?? 200));
+            setText(el.rawBody, JSON.stringify(study.response, null, 2));
+        } else {
+            el.rawStatus.className = "raw-status is-bad";
+            setText(el.rawStatus, String(study.httpStatus ?? "—"));
+            setText(el.rawBody, study.error ?? "");
+        }
+    }
+
+    const showClassify = study && (study.classification || study.classError);
+    el.rawClsBlock.hidden = !showClassify;
+    if (showClassify) {
+        setText(el.rawClsReq, `POST ${CLASSIFY_ENDPOINT}`);
+        if (study.classification) {
+            el.rawClsStatus.className = "raw-status";
+            setText(el.rawClsStatus, String(study.classHttpStatus ?? 200));
+            // The base64 PNG is tens of kilobytes of noise in a debug panel;
+            // its size is the only part worth reading.
+            const { heatmap, ...rest } = study.classification;
+            setText(el.rawClsBody, JSON.stringify({
+                ...rest,
+                heatmap: heatmap ? `<data:image/png;base64, ${Math.round(heatmap.length / 1024)} KB>` : null,
+            }, null, 2));
+        } else {
+            el.rawClsStatus.className = "raw-status is-bad";
+            setText(el.rawClsStatus, String(study.classHttpStatus ?? "—"));
+            setText(el.rawClsBody, study.classError ?? "");
+        }
     }
 }
 
@@ -906,7 +1111,7 @@ function renderRaw() {
 function renderSteps() {
     const study = activeStudy();
     let active = 1;
-    if (study && study.status === "done" && study.detections) active = 3;
+    if (study && study.status === "done" && (study.detections || study.classification)) active = 3;
     else if (study) active = 2;
 
     el.steps.querySelectorAll(".step").forEach((node) => {
@@ -928,8 +1133,8 @@ function renderActions() {
     if (busy && !spinner) el.runBtn.prepend(Object.assign(document.createElement("span"), { className: "spinner" }));
     if (!busy && spinner) spinner.remove();
     label.textContent = busy
-        ? "Detecting…"
-        : (study?.response ? "Re-run detection" : "Run detection");
+        ? "Analysing…"
+        : (study?.response || study?.classification ? "Re-run analysis" : "Run analysis");
 
     el.compareBtn.disabled = studies.length < 2;
     el.compareBtn.classList.toggle("is-on", view.compare);
@@ -953,10 +1158,36 @@ function noteError(message) {
 }
 
 // ---------------------------------------------------------------------
-// Detection
+// Inference
 // ---------------------------------------------------------------------
 
-async function runDetection() {
+/** POST one study to one endpoint; resolves to { status, data } or throws. */
+async function postStudy(endpoint, study, fields) {
+    const form = new FormData();
+    form.append("file", study.file);
+    Object.entries(fields).forEach(([key, value]) => form.append(key, String(value)));
+
+    const res = await fetch(endpoint, { method: "POST", body: form });
+    if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        const error = new Error(
+            detail?.detail ?? `Server responded with ${res.status} ${res.statusText}`,
+        );
+        error.httpStatus = res.status;
+        throw error;
+    }
+    return { status: res.status, data: await res.json() };
+}
+
+/**
+ * Run both models on the active study.
+ *
+ * The calls go out together and are settled independently: the classifier is
+ * an order of magnitude slower than the detector, and a server without the
+ * classifier checkpoint answers /classify with 503 while /predict keeps
+ * working. Either half failing must still leave the other's result on screen.
+ */
+async function runAnalysis() {
     const study = activeStudy();
     if (!study || study.status === "running") return;
 
@@ -965,59 +1196,75 @@ async function runDetection() {
 
     study.status = "running";
     study.error = null;
+    study.classError = null;
     renderAll();
 
     const started = performance.now();
-    try {
-        const form = new FormData();
-        form.append("file", study.file);
-        form.append("conf", String(conf));
-        form.append("iou", String(iou));
+    const [detect, classify] = await Promise.allSettled([
+        postStudy(PREDICT_ENDPOINT, study, { conf, iou }),
+        postStudy(CLASSIFY_ENDPOINT, study, { heatmap: true }),
+    ]);
 
-        const res = await fetch(PREDICT_ENDPOINT, { method: "POST", body: form });
-        study.httpStatus = res.status;
-
-        if (!res.ok) {
-            const detail = await res.json().catch(() => null);
-            throw new Error(detail?.detail ?? `Server responded with ${res.status} ${res.statusText}`);
-        }
-
-        const data = await res.json();
+    if (detect.status === "fulfilled") {
+        const { status, data } = detect.value;
+        study.httpStatus = status;
         study.response = data;
         study.detections = Array.isArray(data.detections) ? data.detections : [];
         study.latencyMs = data.inference_ms ?? (performance.now() - started);
-        study.status = "done";
-    } catch (err) {
-        study.status = "error";
+    } else {
+        study.httpStatus = detect.reason.httpStatus ?? null;
         study.response = null;
         study.detections = null;
         study.error = server.online || study.httpStatus
-            ? String(err.message)
-            : `Could not reach the detection server at ${PREDICT_ENDPOINT}. ` +
+            ? String(detect.reason.message)
+            : `Could not reach the inference server at ${PREDICT_ENDPOINT}. ` +
               "Start it with ./start.sh (FastAPI on :8000, Express on :3000).";
-        console.error(err);
+        console.error(detect.reason);
     }
+
+    if (classify.status === "fulfilled") {
+        const { status, data } = classify.value;
+        study.classHttpStatus = status;
+        study.classification = data;
+        study.classLatencyMs = data.inference_ms ?? (performance.now() - started);
+    } else {
+        study.classHttpStatus = classify.reason.httpStatus ?? null;
+        study.classification = null;
+        study.classError = String(classify.reason.message);
+        console.error(classify.reason);
+    }
+
+    // "error" only when nothing at all came back; a half-run still has
+    // something worth showing, and the failing half explains itself in place.
+    study.status = detect.status === "rejected" && classify.status === "rejected" ? "error" : "done";
 
     renderAll();
 }
 
 function exportJson() {
     const study = activeStudy();
-    if (!study?.response) return;
+    if (!study?.response && !study?.classification) return;
+
+    // The heat map is dropped: a base64 PNG would dwarf the numbers this file
+    // exists to carry, and it is reproducible from the same upload.
+    const classification = study.classification
+        ? (({ heatmap, ...rest }) => rest)(study.classification)
+        : null;
 
     const payload = {
         file: study.name,
-        image_width: study.response.image_width,
-        image_height: study.response.image_height,
+        image_width: study.response?.image_width ?? study.classification?.image_width,
+        image_height: study.response?.image_height ?? study.classification?.image_height,
         requested: { conf: Number(el.confRange.value), iou: Number(el.iouRange.value) },
-        response: study.response,
+        detection: study.response ?? { error: study.error },
+        classification: classification ?? { error: study.classError },
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${study.name.replace(/\.[^.]+$/, "")}-detection.json`;
+    a.download = `${study.name.replace(/\.[^.]+$/, "")}-analysis.json`;
     a.click();
     URL.revokeObjectURL(url);
 }
@@ -1085,7 +1332,7 @@ el.zoomReadout.addEventListener("click", () => {
     renderCorners();
 });
 
-el.runBtn.addEventListener("click", runDetection);
+el.runBtn.addEventListener("click", runAnalysis);
 el.clearBtn.addEventListener("click", clearActive);
 el.exportBtn.addEventListener("click", exportJson);
 

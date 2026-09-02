@@ -84,8 +84,8 @@
 
                     <div class="seg" id="overlay-seg" role="group" aria-label="Overlay mode">
                         <button type="button" data-overlay="box" class="is-on" aria-pressed="true">Box</button>
-                        <button type="button" data-overlay="heat" aria-pressed="false" title="Confidence bloom derived from the returned box — not a model saliency map">Heatmap</button>
-                        <button type="button" data-overlay="both" aria-pressed="false" title="Bounding box plus the box-derived confidence bloom">Both</button>
+                        <button type="button" data-overlay="heat" aria-pressed="false" title="Grad-CAM saliency from the loosening classifier — where the CNN looked">Heatmap</button>
+                        <button type="button" data-overlay="both" aria-pressed="false" title="Bounding box plus the Grad-CAM saliency map">Both</button>
                         <button type="button" data-overlay="off" aria-pressed="false">Off</button>
                     </div>
                 </div>
@@ -159,15 +159,15 @@
                 <ol class="steps" id="steps">
                     <li class="step" data-step="1"><span class="step-index">1</span><span class="step-label">Upload X-ray</span></li>
                     <li class="step-rule" role="presentation"></li>
-                    <li class="step" data-step="2"><span class="step-index">2</span><span class="step-label">Run YOLO inference</span></li>
+                    <li class="step" data-step="2"><span class="step-index">2</span><span class="step-label">Detect + classify</span></li>
                     <li class="step-rule" role="presentation"></li>
-                    <li class="step" data-step="3"><span class="step-index">3</span><span class="step-label">Review bounding box</span></li>
+                    <li class="step" data-step="3"><span class="step-index">3</span><span class="step-label">Review box, verdict, heat map</span></li>
                 </ol>
 
                 <div class="viewer-actions">
                     <button type="button" class="btn" id="clear-btn" disabled>Clear</button>
                     <button type="button" class="btn btn-accent" id="run-btn" disabled>
-                        <span class="btn-label">Run detection</span>
+                        <span class="btn-label">Run analysis</span>
                     </button>
                 </div>
             </div>
@@ -176,16 +176,18 @@
         <!-- ════ findings ═══════════════════════════════════════════ -->
         <aside class="pane pane-findings">
             <div class="pane-head bordered">
-                <span class="pane-title">Detection result</span>
+                <span class="pane-title">Analysis result</span>
                 <span class="status-pill" id="status-pill">Idle</span>
             </div>
 
             <div class="findings-scroll">
 
+                <div class="cls-slot" id="cls-slot"></div>
+
                 <div class="det-cards" id="det-cards"></div>
 
                 <p class="findings-note" id="findings-note">
-                    Select or drop a study, then run detection to see the implant bounding box and confidence here.
+                    Select or drop a study, then run the analysis to see the implant bounding box, the loosening verdict, and the Grad-CAM heat map here.
                 </p>
 
                 <section class="controls">
@@ -234,11 +236,12 @@
 
                 <dl class="meta-list">
                     <span class="block-title">Run metadata</span>
-                    <div class="meta-row"><dt>Checkpoint</dt><dd id="meta-ckpt">—</dd></div>
+                    <div class="meta-row"><dt>Detector</dt><dd id="meta-ckpt">—</dd></div>
+                    <div class="meta-row"><dt>Classifier</dt><dd id="meta-cls-ckpt">—</dd></div>
                     <div class="meta-row"><dt>Image size</dt><dd id="meta-imgsz">—</dd></div>
                     <div class="meta-row"><dt>Classes</dt><dd id="meta-classes">—</dd></div>
                     <div class="meta-row"><dt>Latency</dt><dd id="meta-latency">—</dd></div>
-                    <div class="meta-row"><dt>Endpoint</dt><dd id="meta-endpoint">/api/predict</dd></div>
+                    <div class="meta-row"><dt>Endpoints</dt><dd id="meta-endpoint">/api/predict</dd></div>
                 </dl>
 
                 <details class="raw" id="raw-block" hidden>
@@ -249,13 +252,21 @@
                     <pre id="raw-body"></pre>
                 </details>
 
+                <details class="raw" id="raw-cls-block" hidden>
+                    <summary>
+                        <span id="raw-cls-req">POST /api/classify</span>
+                        <span class="raw-status" id="raw-cls-status">200</span>
+                    </summary>
+                    <pre id="raw-cls-body"></pre>
+                </details>
+
                 <div class="findings-actions">
                     <button type="button" class="btn" id="export-btn" disabled>Export JSON</button>
                 </div>
 
                 <p class="disclaimer">
-                    Localisation only. Loosening classification is not implemented — prototype for
-                    educational purposes, not for clinical use.
+                    Localisation, loosening classification and Grad-CAM saliency. Trained on 206 images —
+                    prototype for educational purposes, not for clinical use.
                 </p>
             </div>
         </aside>
