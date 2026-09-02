@@ -108,6 +108,7 @@ const el = {
     confTick: $("conf-tick"), confHint: $("conf-hint"),
     iouRange: $("iou-range"), iouOut: $("iou-out"),
     windowRange: $("window-range"), levelRange: $("level-range"), wlOut: $("wl-out"),
+    ctrlReset: $("ctrl-reset"),
 
     metaCkpt: $("meta-ckpt"), metaClsCkpt: $("meta-cls-ckpt"), metaImgsz: $("meta-imgsz"),
     metaClasses: $("meta-classes"), metaLatency: $("meta-latency"),
@@ -155,6 +156,10 @@ const server = {
     classes: [],
     modelName: null,
     modelPath: null,
+    // Last thresholds /health reported — what "Reset" restores the two
+    // threshold sliders to, in preference to their markup defaults.
+    confDefault: null,
+    iouDefault: null,
     // Mirror of /health.classifier — null until the first successful poll, and
     // { available: false } when the checkpoint is not on the server.
     classifier: null,
@@ -233,11 +238,13 @@ async function pollHealth() {
 
         // Only adopt the server's thresholds until the reader touches a slider;
         // after that the sliders are the source of truth for the next run.
-        if (!touchedConf && typeof data.conf_threshold === "number") {
-            el.confRange.value = String(data.conf_threshold);
+        if (typeof data.conf_threshold === "number") server.confDefault = data.conf_threshold;
+        if (typeof data.iou_threshold === "number") server.iouDefault = data.iou_threshold;
+        if (!touchedConf && server.confDefault !== null) {
+            el.confRange.value = String(server.confDefault);
         }
-        if (!touchedIou && typeof data.iou_threshold === "number") {
-            el.iouRange.value = String(data.iou_threshold);
+        if (!touchedIou && server.iouDefault !== null) {
+            el.iouRange.value = String(server.iouDefault);
         }
         renderControls();
         renderMeta();
@@ -480,8 +487,10 @@ function renderViewer() {
     }
 
     applyWindowLevel();
-    applyTransform();
+    // Fit first: applyTransform() clamps the pan against the frame box, so it
+    // needs the sizes fitFrames() writes rather than the previous study's.
     fitFrames();
+    applyTransform();
     drawOverlays(el.viewerOverlays, study, false);
     drawOverlays(el.leftOverlays, left, true);
 }
@@ -596,11 +605,57 @@ function applyWindowLevel() {
     el.leftImage.style.filter = filter;
 }
 
+/**
+ * How far the image may be dragged from centre: however much of it hangs
+ * outside its frame once scaled. Fitted to the frame there is nothing hidden,
+ * so both limits are zero and the image stays put; zoomed in, every edge is
+ * reachable and the image can never be dragged out of view.
+ */
+function panLimits() {
+    const frame = el.frameInner.parentElement;
+    if (!frame || !el.frameInner.offsetWidth) return { x: 0, y: 0 };
+    return {
+        x: Math.max(0, (el.frameInner.offsetWidth * view.zoom - frame.clientWidth) / 2),
+        y: Math.max(0, (el.frameInner.offsetHeight * view.zoom - frame.clientHeight) / 2),
+    };
+}
+
+/** True when some of the image is off-frame, i.e. dragging would show more. */
+function canPan() {
+    const lim = panLimits();
+    return lim.x > 0.5 || lim.y > 0.5;
+}
+
 function applyTransform() {
+    const lim = panLimits();
+    view.panX = clamp(view.panX, -lim.x, lim.x);
+    view.panY = clamp(view.panY, -lim.y, lim.y);
+
     const t = `translate(${view.panX}px, ${view.panY}px) scale(${view.zoom})`;
     el.frameInner.style.transform = t;
     el.leftInner.style.transform = t;
+    // Grab cursor whenever a plain drag would pan, whatever tool is armed.
+    el.stage.classList.toggle("is-pannable", canPan());
     setText(el.zoomReadout, `${Math.round(view.zoom * 100)}%`);
+}
+
+/**
+ * Zoom by `factor` about a point on screen, keeping the pixel under that point
+ * under it. With `translate(pan) scale(z)` about the frame's centre, the image
+ * point at cursor offset m is u = (m − pan) / z; holding u fixed across the
+ * zoom change gives the pan below.
+ */
+function zoomAt(factor, clientX, clientY) {
+    const next = clamp(view.zoom * factor, 0.2, 8);
+    const rect = el.frameInner.parentElement.getBoundingClientRect();
+    const mx = clientX - (rect.left + rect.width / 2);
+    const my = clientY - (rect.top + rect.height / 2);
+    const k = next / view.zoom;
+
+    view.panX = mx - k * (mx - view.panX);
+    view.panY = my - k * (my - view.panY);
+    view.zoom = next;
+    applyTransform();
 }
 
 function resetTransform() {
@@ -988,6 +1043,50 @@ function detectionCard(det) {
     return card;
 }
 
+/**
+ * Where "Reset" puts the four knobs: the server's thresholds once /health has
+ * answered, otherwise the value= attributes in the markup, which the window
+ * and level sliders always use since neither is a server-side setting.
+ */
+function controlDefaults() {
+    return {
+        conf: server.confDefault ?? Number(el.confRange.defaultValue),
+        iou: server.iouDefault ?? Number(el.iouRange.defaultValue),
+        win: Number(el.windowRange.defaultValue),
+        level: Number(el.levelRange.defaultValue),
+    };
+}
+
+/** True when nothing is left to reset — the button greys out on that. */
+function controlsAreDefault() {
+    const d = controlDefaults();
+    // The sliders snap to their step, so a server threshold that falls between
+    // two steps never compares exactly equal; a half-step tolerance does.
+    const near = (a, b) => Math.abs(a - b) < 0.005;
+    return near(Number(el.confRange.value), d.conf)
+        && near(Number(el.iouRange.value), d.iou)
+        && Number(el.windowRange.value) === d.win
+        && Number(el.levelRange.value) === d.level;
+}
+
+/**
+ * Back to the defaults. Clearing the touched flags also hands the thresholds
+ * back to /health, so a server restarted with different settings is adopted
+ * again on the next poll.
+ */
+function resetControls() {
+    const d = controlDefaults();
+    touchedConf = false;
+    touchedIou = false;
+    el.confRange.value = String(d.conf);
+    el.iouRange.value = String(d.iou);
+    el.windowRange.value = String(d.win);
+    el.levelRange.value = String(d.level);
+    applyWindowLevel();
+    renderControls();
+    renderCorners();
+}
+
 function renderControls() {
     const conf = Number(el.confRange.value);
     const iou = Number(el.iouRange.value);
@@ -999,6 +1098,8 @@ function renderControls() {
     paintTrack(el.iouRange, "var(--color-accent-700)");
     paintTrack(el.windowRange, "var(--color-accent-600)");
     paintTrack(el.levelRange, "var(--color-neutral-700)");
+
+    el.ctrlReset.disabled = controlsAreDefault();
 
     // Tick showing where the current top detection sits on the threshold track.
     const top = activeStudy()?.detections?.[0]?.confidence;
@@ -1345,6 +1446,8 @@ el.exportBtn.addEventListener("click", exportJson);
     });
 });
 
+el.ctrlReset.addEventListener("click", resetControls);
+
 [el.windowRange, el.levelRange].forEach((input) => {
     input.addEventListener("input", () => {
         applyWindowLevel();
@@ -1357,9 +1460,24 @@ el.exportBtn.addEventListener("click", exportJson);
 
 let drag = null;
 
+/**
+ * What a drag starting on this event does. Panning is what a reader reaches
+ * for once the image is bigger than its frame, so past that point a plain drag
+ * pans whichever tool is armed; window/level stays a Shift-drag away, and the
+ * middle button pans at any zoom.
+ */
+function dragMode(e) {
+    if (e.button === 1 || view.tool === "pan") return "pan";
+    if (view.tool === "zoom") return "zoom";
+    if (canPan() && !e.shiftKey) return "pan";
+    return "wl";
+}
+
 el.stage.addEventListener("pointerdown", (e) => {
-    if (!activeStudy() || e.button !== 0) return;
+    if (!activeStudy() || (e.button !== 0 && e.button !== 1)) return;
+    e.preventDefault();   // no middle-click autoscroll, no image drag ghost
     drag = {
+        mode: dragMode(e),
         x: e.clientX,
         y: e.clientY,
         zoom: view.zoom,
@@ -1369,7 +1487,7 @@ el.stage.addEventListener("pointerdown", (e) => {
         level: Number(el.levelRange.value),
     };
     el.stage.setPointerCapture(e.pointerId);
-    el.stage.classList.add("is-dragging");
+    el.stage.classList.add("is-dragging", `drag-${drag.mode}`);
 });
 
 el.stage.addEventListener("pointermove", (e) => {
@@ -1377,11 +1495,11 @@ el.stage.addEventListener("pointermove", (e) => {
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
 
-    if (view.tool === "pan") {
+    if (drag.mode === "pan") {
         view.panX = drag.panX + dx;
         view.panY = drag.panY + dy;
         applyTransform();
-    } else if (view.tool === "zoom") {
+    } else if (drag.mode === "zoom") {
         view.zoom = clamp(drag.zoom * Math.exp(-dy / 220), 0.2, 8);
         applyTransform();
     } else {
@@ -1398,7 +1516,7 @@ el.stage.addEventListener("pointermove", (e) => {
 ["pointerup", "pointercancel"].forEach((type) => {
     el.stage.addEventListener(type, (e) => {
         drag = null;
-        el.stage.classList.remove("is-dragging");
+        el.stage.classList.remove("is-dragging", "drag-pan", "drag-zoom", "drag-wl");
         if (el.stage.hasPointerCapture?.(e.pointerId)) el.stage.releasePointerCapture(e.pointerId);
     });
 });
@@ -1406,13 +1524,13 @@ el.stage.addEventListener("pointermove", (e) => {
 el.stage.addEventListener("wheel", (e) => {
     if (!activeStudy()) return;
     e.preventDefault();
-    view.zoom = clamp(view.zoom * Math.exp(-e.deltaY / 500), 0.2, 8);
-    applyTransform();
+    zoomAt(Math.exp(-e.deltaY / 500), e.clientX, e.clientY);
     renderCorners();
 }, { passive: false });
 
 window.addEventListener("resize", () => {
     fitFrames();
+    applyTransform();   // the frames changed size, so the pan limits did too
     renderCorners();
 });
 

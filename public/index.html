@@ -67,7 +67,7 @@
 
             <div class="viewer-toolbar">
                 <div class="tool-group" role="group" aria-label="Viewer tools">
-                    <button type="button" class="tool is-on" data-tool="wl" title="Window / level — drag on the image" aria-pressed="true">
+                    <button type="button" class="tool is-on" data-tool="wl" title="Window / level — drag on the image (hold Shift while zoomed in)" aria-pressed="true">
                         <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Z"/></svg>
                         <span class="sr-only">Window / level</span>
                     </button>
@@ -75,7 +75,7 @@
                         <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/></svg>
                         <span class="sr-only">Zoom</span>
                     </button>
-                    <button type="button" class="tool" data-tool="pan" title="Pan — drag on the image" aria-pressed="false">
+                    <button type="button" class="tool" data-tool="pan" title="Pan — drag on the image; once zoomed in, a plain drag pans with any tool" aria-pressed="false">
                         <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M221.66,133.66l-72,72a8,8,0,0,1-11.32-11.32L196.69,136H40a8,8,0,0,1,0-16H196.69L138.34,61.66a8,8,0,0,1,11.32-11.32l72,72A8,8,0,0,1,221.66,133.66Z"/></svg>
                         <span class="sr-only">Pan</span>
                     </button>
@@ -120,7 +120,7 @@
                             </div>
                         </div>
                     </div>
-                    <button type="button" class="zoom-readout" id="zoom-readout" title="Reset zoom and pan">100%</button>
+                    <button type="button" class="zoom-readout" id="zoom-readout" title="Reset zoom and pan — scroll on the image to zoom">100%</button>
                 </div>
             </div>
 
@@ -134,7 +134,7 @@
                 <div class="stage-frames" id="stage-frames" hidden>
                     <figure class="frame frame-left" id="frame-left" hidden>
                         <div class="frame-inner" id="left-inner">
-                            <img id="left-image" alt="Study on the left of the comparison">
+                            <img id="left-image" draggable="false" alt="Study on the left of the comparison">
                             <div class="frame-overlays" id="left-overlays"></div>
                         </div>
                         <figcaption class="frame-tag" id="left-tag"></figcaption>
@@ -142,7 +142,7 @@
 
                     <figure class="frame frame-current">
                         <div class="frame-inner" id="frame-inner">
-                            <img id="viewer-image" alt="X-ray under review">
+                            <img id="viewer-image" draggable="false" alt="X-ray under review">
                             <div class="frame-overlays" id="viewer-overlays"></div>
                         </div>
                         <figcaption class="frame-tag" id="current-tag" hidden></figcaption>
@@ -191,7 +191,14 @@
                 </p>
 
                 <section class="controls">
-                    <span class="block-title">Inference controls</span>
+                    <div class="controls-head">
+                        <span class="block-title">Inference controls</span>
+                        <button type="button" class="mini-btn" id="ctrl-reset" disabled
+                                title="Restore confidence, IoU and window/level to their defaults">
+                            <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M197.67,186.37a8,8,0,0,1,0,11.29C196.58,198.73,170.82,224,128,224c-37.39,0-64.53-22.4-80-39.85V208a8,8,0,0,1-16,0V164a8,8,0,0,1,8-8H84a8,8,0,0,1,0,16H55.32C67.74,190.32,92.32,208,128,208c36,0,58.14-21.46,58.36-21.68A8,8,0,0,1,197.67,186.37ZM216,40a8,8,0,0,0-8,8V71.85C192.53,54.4,165.39,32,128,32,85.18,32,59.42,57.27,58.34,58.34a8,8,0,0,0,11.3,11.34C69.86,69.46,92,48,128,48c35.68,0,60.26,17.68,72.68,32H172a8,8,0,0,0,0,16h44a8,8,0,0,0,8-8V48A8,8,0,0,0,216,40Z"/></svg>
+                            Reset
+                        </button>
+                    </div>
 
                     <div class="ctrl">
                         <div class="ctrl-head">

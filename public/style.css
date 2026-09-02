@@ -607,11 +607,23 @@ body.is-dragover .dropzone {
     overflow: hidden;
     display: grid;
     place-items: center;
+    /* Every drag on the stage is a tool gesture, so the browser must not
+       claim one of them for scrolling or pinch on a touch screen. */
+    touch-action: none;
 }
 .viewer-stage.tool-wl { cursor: ns-resize; }
 .viewer-stage.tool-zoom { cursor: zoom-in; }
 .viewer-stage.tool-pan { cursor: grab; }
-.viewer-stage.is-dragging { cursor: grabbing; }
+
+/* Zoomed past the frame there is more image to reach, and a plain drag pans
+   whichever tool is armed — so the cursor says so. */
+.viewer-stage.is-pannable { cursor: grab; }
+
+/* Mid-drag the cursor follows what the drag is actually doing, which is not
+   always the armed tool. Last so it wins over both blocks above. */
+.viewer-stage.drag-wl { cursor: ns-resize; }
+.viewer-stage.drag-zoom { cursor: zoom-in; }
+.viewer-stage.drag-pan { cursor: grabbing; }
 
 .stage-empty {
     display: flex;
@@ -664,6 +676,9 @@ body.is-dragover .dropzone {
 .frame-inner > img {
     display: block;
     image-rendering: auto;
+    /* A native image drag would hijack the pan and wake the file dropzone. */
+    -webkit-user-drag: none;
+    user-select: none;
 }
 
 /* fitFrame() in app.js sizes .frame-inner to the contain-fit rectangle, so
@@ -1053,6 +1068,27 @@ body.is-dragover .dropzone {
     border: 1px solid var(--color-neutral-900);
     border-radius: 8px;
 }
+
+.controls-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* A quieter sibling of .btn, sized to sit on a .block-title's line. */
+.mini-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 11px;
+    color: var(--color-neutral-500);
+    background: none;
+    border: 1px solid var(--color-neutral-800);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.mini-btn svg { width: 12px; height: 12px; flex: none; }
+.mini-btn:hover:not(:disabled) { color: var(--color-neutral-200); border-color: var(--color-neutral-700); }
+.mini-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 .ctrl { display: flex; flex-direction: column; gap: 7px; }
 
