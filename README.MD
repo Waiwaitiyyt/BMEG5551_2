@@ -2,6 +2,8 @@
 
 This is the group project repository for **BMEG5552** at the **University of Western Australia**. The project demonstrates a software pipeline for detecting **aseptic loosening** of orthopaedic implants from X-ray images.
 
+![Demo screenshot](img/Screenshot_Demo.jpeg)
+
 > **Important:** This is a **demo prototype for educational purposes, not for clinical use.** The classifier is trained on 206 images from a single public database, which is far too small to support a clinical claim.
 
 ---
