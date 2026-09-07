@@ -610,6 +610,112 @@ DEVICE=0 CONF_THRESHOLD=0.5 uv run python server.py
 
 ---
 
+## The ResNet50 classifier in code
+
+Two files implement it. `tools/implant_loosening/model.py` builds and trains it;
+`server/py/classifier.py` is a self-contained re-implementation the FastAPI
+server loads at startup, written so the server runs without `tools/` on the path.
+
+**Backbone and head.** `build_model("resnet50", …)` takes
+`torchvision.models.resnet50` with the `IMAGENET1K_V2` pretrained weights and
+replaces its 1000-class `fc` layer with
+
+```python
+nn.Sequential(nn.Dropout(0.3), nn.Linear(2048, 1))
+```
+
+One logit, not a two-way softmax. That is the deliberate change from the
+original notebook: a single logit trained with `BCEWithLogitsLoss` yields a
+probability, an AUC that does not depend on any threshold, and a decision
+threshold that can be tuned *after* training. Everything up to `layer4` and the
+global average pool is the stock ImageNet ResNet50.
+
+**Input pipeline.** X-rays are single channel. The eval transform
+(`data.build_transforms(…, train=False)`, mirrored in `classifier.py`) is
+`convert("L")` → `Resize(short side = 320 × 1.14)` → `CenterCrop(320)` →
+`Grayscale(num_output_channels=3)` → `ToTensor` → `Normalize` with the ImageNet
+mean/std. The grayscale scan is replicated to three channels and normalised to
+the distribution the pretrained backbone expects. The `1.14×` resize-then-crop
+leaves roughly the central 88% of a square image; `LooseningClassifier.crop_box()`
+reports that rectangle in source pixels so the frontend can place the overlay.
+
+**Training** (`tools/implant_loosening/train.py`, run on Colab). A frozen-backbone
+warm-up (`--freeze-epochs 3`, head only) is followed by full fine-tuning.
+`AdamW` uses two parameter groups — backbone at `2e-4`, head at `1e-3` — with
+`1e-4` weight decay and a cosine-annealing schedule, mixed precision on CUDA,
+label-smoothed BCE (`0.05`), and a class-balanced `WeightedRandomSampler` for the
+94/112 split. Horizontal-flip TTA and early stopping on validation AUC
+(patience 10). The epoch with the best validation AUC is kept, and the decision
+threshold is then set by Youden's J on the validation probabilities
+(`metrics.best_threshold`).
+
+**Self-describing checkpoint.** `torch.save` writes `arch`, `img_size`,
+`dropout`, `threshold`, `class_names`, and `val_metrics` next to `state_dict`.
+`LooseningClassifier.__init__` reads all of them back, so the server is never
+told the input size or threshold by hand — swapping in a different fold, or a
+different architecture entirely, needs no code change. The deployed checkpoint
+is `fold1`.
+
+**Inference.** `classify()` runs `torch.sigmoid(model(x).squeeze())` for
+p(Loose), averages a horizontal-flip pass when `tta=True`, then applies the
+threshold: `label = "Loose" if p >= threshold else "Control"`, with `confidence`
+reported as `p` for Loose and `1 - p` for Control. The model is loaded once,
+moved to the device, and left in `eval()`; FastAPI runs the synchronous handler
+on its threadpool.
+
+---
+
+## Grad-CAM in code
+
+Grad-CAM turns the classifier's decision into a saliency map over the
+radiograph. The server implementation is `LooseningClassifier._grad_cam` and
+`_cam_to_png` in `server/py/classifier.py`; `tools/implant_loosening/predict.py`
+has a matplotlib version for offline inspection.
+
+**Target layer.** The server hooks `model.layer4` — the whole final residual
+stage — not the last `Conv2d` inside it. The block output is taken *after* the
+residual addition and the ReLU, which is exactly what the global average pool
+and the `fc` logit consume, so the weighting reflects what the network actually
+used. (`predict.py` hooks the deepest `Conv2d` instead; adequate for a quick
+look, but the block output is the more faithful target.)
+
+**Computing the map.**
+
+1. A `forward_hook` on `layer4` captures the activations `A` (shape
+   `[1, 2048, 10, 10]` at 320 px); a `full_backward_hook` captures the gradients.
+2. A forward pass, then `logit.backward()`. There is only one logit — the Loose
+   score — so no class index has to be selected. Back-propagating it means
+   positive contributions are evidence *for* loosening, the direction worth
+   showing.
+3. The channel weights are the gradients global-average-pooled over the spatial
+   dims: `w = grad.mean(dim=(2, 3))`.
+4. `cam = ReLU(Σ_c w_c · A_c)` — a weighted sum over channels that keeps only
+   positive evidence.
+5. Bilinear upsample to 320×320, then min–max normalise to `[0, 1]`. If the
+   range is below `1e-8` the layer produced no positive evidence, and the map is
+   returned as zeros rather than amplified numerical noise.
+
+**Rendering.** `_colourise` maps `[0, 1]` through a blue→cyan→green→yellow→red
+ramp and ramps alpha up from zero starting at `0.35`, so cold regions stay fully
+transparent and the bone underneath stays readable. `_cam_to_png` pastes the
+coloured map into the centre-crop rectangle of a full-size transparent RGBA PNG,
+so the frontend stretches it over the original image with no coordinate maths
+and the transparent border makes plain what the model never saw.
+
+**Concurrency.** Grad-CAM registers hooks and runs a backward pass on the shared
+model instance, so two requests in flight at once would interleave their
+activations and gradients. `_cam_lock` (a `threading.Lock`) serialises the CAM
+section; the plain forward pass for the probability is untouched. Computing the
+map roughly triples CPU latency (~0.5 s versus ~0.19 s), which is why
+`/classify` accepts `heatmap=false`.
+
+**Reading it.** The map is renormalised per image, so the hottest region is only
+the *relative* peak — on a confidently `Control` case it still lights up
+somewhere, marking the best evidence for loosening the model could find, which
+may be almost none.
+
+---
+
 ## Important Notes
 
 - **Python versions** are pinned in `.python-version` files inside each component folder. `uv sync` respects these automatically — you do not need to manually manage Python versions.
