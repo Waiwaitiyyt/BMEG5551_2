@@ -295,6 +295,7 @@ async def health() -> dict[str, Any]:
     classifier = state["classifier"]
     return {
         "status": "ok" if model is not None else "loading",
+        "version": app.version,
         "model_path": str(MODEL_PATH),
         "model_name": MODEL_PATH.name,
         "classes": list(model.names.values()) if model is not None else [],

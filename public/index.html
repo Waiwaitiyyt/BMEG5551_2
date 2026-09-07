@@ -269,6 +269,16 @@
 
                 <div class="findings-actions">
                     <button type="button" class="btn" id="export-btn" disabled>Export JSON</button>
+                    <button type="button" class="btn btn-accent" id="report-btn" disabled>Export PDF report</button>
+                </div>
+
+                <div class="save-images">
+                    <span class="save-images-label">Save image (PNG)</span>
+                    <div class="save-images-row" role="group" aria-label="Save the X-ray as a PNG with overlays">
+                        <button type="button" class="mini-btn" id="save-box" disabled>Box</button>
+                        <button type="button" class="mini-btn" id="save-heat" disabled>Heatmap</button>
+                        <button type="button" class="mini-btn" id="save-both" disabled>Both</button>
+                    </div>
                 </div>
 
                 <p class="disclaimer">
@@ -280,6 +290,37 @@
 
     </div>
 </div>
+
+<!-- ════ PDF report — optional case details before print ════════════ -->
+<dialog class="report-dialog" id="report-dialog">
+    <form method="dialog" class="report-form" id="report-form">
+        <div class="report-form-head">
+            <span class="pop-title">Export PDF report</span>
+            <span class="pop-hint">Optional case details. Blank fields are left off the report, and nothing is saved anywhere.</span>
+        </div>
+        <div class="report-grid">
+            <label>Patient ID
+                <input type="text" id="rf-pid" autocomplete="off" spellcheck="false">
+            </label>
+            <label>Patient name
+                <input type="text" id="rf-pname" autocomplete="off" spellcheck="false">
+            </label>
+            <label>Study date
+                <input type="date" id="rf-date">
+            </label>
+            <label>Reporting clinician
+                <input type="text" id="rf-clin" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="report-grid-wide">Notes
+                <textarea id="rf-notes" rows="3" spellcheck="false"></textarea>
+            </label>
+        </div>
+        <div class="report-form-foot">
+            <button type="button" class="btn" id="rf-cancel">Cancel</button>
+            <button type="submit" class="btn btn-accent" value="go">Generate report</button>
+        </div>
+    </form>
+</dialog>
 
 <script src="app.js"></script>
 </body>

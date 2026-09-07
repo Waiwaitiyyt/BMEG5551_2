@@ -366,7 +366,7 @@ workstation:
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Study queue** (left) | Drop one or many X-rays anywhere on the window to build a session queue. Each row shows its thumbnail, dimensions, and either its verdict (`loose 97%` / `fixed 100%`) or its state (`queued`, `running`, `none`, `error`). Filter by file name. Nothing is persisted server-side. |
 | **Viewer** (centre)    | The active study with the detector's box and the classifier's Grad-CAM drawn over it. Tools: **window/level**, **zoom**, **pan** — pick one, then drag on the image. The scroll wheel zooms about the pointer, and once the image is larger than its frame a plain drag pans it whatever tool is armed, so you can zoom in and go looking (hold **Shift** to keep adjusting window/level there, or drag with the middle button to pan at any zoom). The pan stops at the image edges; click the zoom readout to reset. Overlay modes: **Box**, **Heatmap**, **Both**, **Off** — a display switch, not a re-run. **Compare** opens a picker for choosing any two queued studies, then splits the viewer between them (A on the left, B on the right; B is the active study). |
-| **Findings** (right)   | The loosening verdict with p(loose) and the decision threshold, then the confidence bar and `xyxy` per detection, the **inference controls**, the run metadata, both raw JSON responses, and **Export JSON**. |
+| **Findings** (right)   | The loosening verdict with p(loose) and the decision threshold, then the confidence bar and `xyxy` per detection, the **inference controls**, the run metadata, both raw JSON responses, **Export JSON**, **Export PDF report**, and **Save image** (PNG of the X-ray with the box, the heat map, or both). |
 
 **Run analysis** fires both models at once. The verdict card is tinted by its
 own answer — red for loosening, green for well fixed — and reports the
@@ -383,6 +383,23 @@ untouched original file.
 > classifier, not a decoration derived from the box. On confidently well-fixed
 > cases read it with care — Grad-CAM rescales per image, so a hot spot appears
 > even when the activation behind it is negligible.
+
+**Export PDF report** opens a printable one-page report for the active study and
+hands it to the browser's *Save as PDF*. It carries the diagnosis (verdict,
+p(loose), decision threshold, margin to threshold), the X-ray with the bounding
+box and Grad-CAM baked in plus a clean copy, the detection table, and the run
+metadata — including the **frontend and inference-API versions**, both model
+checkpoints, the thresholds actually used, and the validation metrics. A small
+dialog first collects optional case fields (patient ID and name, study date,
+reporting clinician, notes); blank fields are omitted and nothing is persisted.
+The report is generated entirely in the browser — no library, no server round
+trip — so it works from `file://` too.
+
+**Save image** writes a single PNG of the active study's X-ray with the overlay
+you pick — **Box**, **Heatmap**, or **Both** — drawn on at the X-ray's native
+resolution, with the current window/level baked in. Each button is enabled only
+when that overlay exists (a detection for **Box**, a Grad-CAM map for
+**Heatmap**). Same canvas path as the report, so no library is needed.
 
 > Opening `public/index.html` directly from disk also works — `app.js` then falls
 > back to `http://localhost:8000` — but going through <http://localhost:3000> is
@@ -545,6 +562,7 @@ Reports model status and the defaults the frontend seeds its controls from.
 ```json
 {
   "status": "ok",
+  "version": "0.1.0",
   "model_path": "/…/server/py/weights/best.pt",
   "model_name": "best.pt",
   "classes": ["Implant"],

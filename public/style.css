@@ -1229,6 +1229,72 @@ body.is-dragover .dropzone {
 .findings-actions { display: flex; gap: 8px; }
 .findings-actions .btn { flex: 1; }
 
+.save-images {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+}
+.save-images-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--color-neutral-600);
+}
+.save-images-row { display: flex; gap: 6px; }
+.save-images-row .mini-btn { padding: 4px 10px; }
+
+/* ── PDF report dialog — optional case details before printing ─────────── */
+
+.report-dialog {
+    width: 440px;
+    max-width: calc(100vw - 32px);
+    padding: 0;
+    border: 1px solid var(--color-neutral-800);
+    border-radius: var(--radius-md);
+    background: var(--ws-raised);
+    color: var(--color-text);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
+}
+.report-dialog::backdrop { background: rgba(8, 9, 13, .62); }
+
+.report-form { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+.report-form-head { display: flex; flex-direction: column; gap: 3px; }
+.report-form-head .pop-hint { white-space: normal; }
+
+.report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.report-grid-wide { grid-column: 1 / -1; }
+.report-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--color-neutral-600);
+}
+.report-grid input,
+.report-grid textarea {
+    font: inherit;
+    font-size: 12px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--color-text);
+    background: var(--ws-pane);
+    border: 1px solid var(--color-neutral-900);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+.report-grid textarea { resize: vertical; min-height: 52px; }
+.report-grid input:focus,
+.report-grid textarea:focus { outline: none; border-color: var(--color-accent-600); }
+
+.report-form-foot { display: flex; justify-content: flex-end; gap: 8px; }
+.report-form-foot .btn { height: 30px; font-size: 12px; }
+
 .disclaimer {
     margin: auto 0 0;
     font-size: 11px;

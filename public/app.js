@@ -16,7 +16,7 @@
 // API contract
 // ------------
 //   GET  {API}/health
-//     -> { status, model_path, model_name, classes, conf_threshold,
+//     -> { status, version, model_path, model_name, classes, conf_threshold,
 //          iou_threshold, imgsz, device,
 //          classifier: { available, model_name, arch, classes, threshold,
 //                        img_size, val_metrics } }
@@ -55,6 +55,10 @@ const CLASSIFY_ENDPOINT = `${API_BASE}/classify`;
 const HEALTH_ENDPOINT = `${API_BASE}/health`;
 const GATEWAY_HEALTH = IS_FILE ? null : "/healthz";
 const HEALTH_INTERVAL_MS = 15000;
+
+// This frontend's own version, stamped onto the PDF report. The inference API
+// reports its version through /health; this one has no server to ask.
+const APP_VERSION = "0.1.0";
 
 const $ = (id) => document.getElementById(id);
 
@@ -119,6 +123,12 @@ const el = {
     rawClsBlock: $("raw-cls-block"), rawClsReq: $("raw-cls-req"),
     rawClsStatus: $("raw-cls-status"), rawClsBody: $("raw-cls-body"),
     exportBtn: $("export-btn"),
+    reportBtn: $("report-btn"),
+    saveBox: $("save-box"), saveHeat: $("save-heat"), saveBoth: $("save-both"),
+
+    reportDialog: $("report-dialog"),
+    rfPid: $("rf-pid"), rfPname: $("rf-pname"), rfDate: $("rf-date"),
+    rfClin: $("rf-clin"), rfNotes: $("rf-notes"), rfCancel: $("rf-cancel"),
 };
 
 // ---------------------------------------------------------------------
@@ -156,6 +166,7 @@ const server = {
     classes: [],
     modelName: null,
     modelPath: null,
+    apiVersion: null,        // /health.version — stamped onto the PDF report
     // Last thresholds /health reported — what "Reset" restores the two
     // threshold sliders to, in preference to their markup defaults.
     confDefault: null,
@@ -224,6 +235,7 @@ async function pollHealth() {
         const data = await res.json();
 
         server.online = data.status === "ok";
+        server.apiVersion = data.version ?? server.apiVersion;
         server.imgsz = data.imgsz ?? server.imgsz;
         server.classes = Array.isArray(data.classes) ? data.classes : [];
         server.modelPath = data.model_path ?? null;
@@ -899,6 +911,12 @@ function renderFindings() {
     renderRaw();
 
     el.exportBtn.disabled = !study?.response && !study?.classification;
+    el.reportBtn.disabled = !study?.response && !study?.classification;
+
+    const avail = overlayAvailability(study);
+    el.saveBox.disabled = !avail.box;
+    el.saveHeat.disabled = !avail.heat;
+    el.saveBoth.disabled = !avail.any;
 }
 
 /**
@@ -1371,6 +1389,402 @@ function exportJson() {
 }
 
 // ---------------------------------------------------------------------
+// PDF report — a self-contained page opened in a new window, printed to
+// PDF by the browser. No libraries, so it also works from file://.
+// ---------------------------------------------------------------------
+
+function esc(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("an image for the report failed to load"));
+        img.src = src;
+    });
+}
+
+/** Decode the study's X-ray and, if present, its Grad-CAM PNG once. */
+async function studyAssets(study) {
+    const base = await loadImage(study.url);
+    let heat = null;
+    if (study.classification?.heatmap) {
+        heat = await loadImage(study.classification.heatmap).catch(() => null);
+    }
+    return { base, heat };
+}
+
+/**
+ * Draw one study onto a fresh canvas at the X-ray's native resolution, with the
+ * window/level the viewer is currently showing baked in — so a saved image
+ * matches what was on screen rather than the raw file. `opts.heat` adds the
+ * Grad-CAM overlay, `opts.box` adds the detector rectangles; pass neither for
+ * the clean image.
+ */
+function renderStudyCanvas(study, base, heat, opts) {
+    const W = study.response?.image_width || study.classification?.image_width || study.width;
+    const H = study.response?.image_height || study.classification?.image_height || study.height;
+
+    const win = Number(el.windowRange.value);
+    const level = Math.max(1, Number(el.levelRange.value));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    ctx.filter = `brightness(${(127.5 / level).toFixed(3)}) contrast(${(255 / win).toFixed(3)})`;
+    ctx.drawImage(base, 0, 0, W, H);
+    ctx.filter = "none";
+
+    if (opts.heat && heat) ctx.drawImage(heat, 0, 0, W, H);
+
+    if (opts.box) {
+        const dets = study.status === "done" ? (study.detections ?? []) : [];
+        const fontPx = Math.max(11, Math.round(Math.min(W, H) / 32));
+        ctx.lineWidth = Math.max(2, Math.round(Math.min(W, H) / 220));
+        ctx.font = `600 ${fontPx}px "Inter", system-ui, sans-serif`;
+        ctx.textBaseline = "bottom";
+        dets.forEach((det, i) => {
+            const [x1, y1, x2, y2] = det.box;
+            const colour = i === 0 ? "#2fb46b" : "#e0a23c";
+            ctx.strokeStyle = colour;
+            ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+            const tag = `${det.label ?? "implant"} ${Number(det.confidence ?? 0).toFixed(2)}`;
+            const tw = ctx.measureText(tag).width;
+            const ty = y1 > fontPx + 6 ? y1 : y1 + fontPx + 8;
+            ctx.fillStyle = colour;
+            ctx.fillRect(x1, ty - fontPx - 4, tw + 10, fontPx + 4);
+            ctx.fillStyle = "#0b0c12";
+            ctx.fillText(tag, x1 + 5, ty - 2);
+        });
+    }
+    return canvas;
+}
+
+/**
+ * Bake the review into two PNG data URIs for the report: the X-ray on its own,
+ * and the same frame with the boxes and the Grad-CAM heat map drawn on.
+ */
+async function buildReportImages(study) {
+    const { base, heat } = await studyAssets(study);
+    const canvas = renderStudyCanvas(study, base, heat, {});
+    return {
+        width: canvas.width,
+        height: canvas.height,
+        original: canvas.toDataURL("image/png"),
+        composite: renderStudyCanvas(study, base, heat, { box: true, heat: true }).toDataURL("image/png"),
+    };
+}
+
+// The three overlay flavours the "Save image" buttons can write.
+const OVERLAY_KINDS = {
+    box: { opts: { box: true }, suffix: "box", needs: "box" },
+    heat: { opts: { heat: true }, suffix: "heatmap", needs: "heat" },
+    both: { opts: { box: true, heat: true }, suffix: "box-heatmap", needs: "any" },
+};
+
+function overlayAvailability(study) {
+    const box = !!(study?.status === "done" && study.detections?.length);
+    const heat = !!study?.classification?.heatmap;
+    return { box, heat, any: box || heat };
+}
+
+/** Save the active study's X-ray as a PNG with the chosen overlay(s) drawn on. */
+async function saveOverlayImage(kind) {
+    const study = activeStudy();
+    const spec = OVERLAY_KINDS[kind];
+    if (!study || !spec) return;
+
+    if (!overlayAvailability(study)[spec.needs]) {
+        noteError(
+            spec.needs === "box"
+                ? "No detection to save yet — run the analysis first."
+                : spec.needs === "heat"
+                  ? "No heat map to save — run the analysis with the classifier available."
+                  : "Nothing to save yet — run the analysis first.",
+        );
+        return;
+    }
+
+    try {
+        const { base, heat } = await studyAssets(study);
+        const canvas = renderStudyCanvas(study, base, heat, spec.opts);
+        const name = `${study.name.replace(/\.[^.]+$/, "")}-${spec.suffix}.png`;
+        canvas.toBlob((blob) => {
+            if (!blob) {
+                noteError("Could not encode the image as PNG.");
+                return;
+            }
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = name;
+            a.click();
+            URL.revokeObjectURL(url);
+        }, "image/png");
+    } catch (err) {
+        console.error(err);
+        noteError(`Could not save the image: ${err.message}`);
+    }
+}
+
+function collectReportMeta() {
+    const val = (node) => (node?.value ?? "").trim();
+    return {
+        patientId: val(el.rfPid),
+        patientName: val(el.rfPname),
+        studyDate: val(el.rfDate),
+        clinician: val(el.rfClin),
+        notes: val(el.rfNotes),
+    };
+}
+
+/** One `<dt>/<dd>` row, or "" when the value is blank so the grid stays tidy. */
+function kvRow(term, value) {
+    if (value === "" || value == null) return "";
+    return `<div class="kv"><dt>${esc(term)}</dt><dd>${esc(value)}</dd></div>`;
+}
+
+function renderReportHtml(study, meta, images) {
+    const now = new Date();
+    const cls = study.classification;
+    const r = study.response;
+    const clsInfo = server.classifier;
+    const num = (v) => (typeof v === "number" ? v.toFixed(3) : "—");
+
+    // --- diagnosis -----------------------------------------------------
+    let verdict;
+    let tone;
+    let detail;
+    if (cls) {
+        const loose = cls.label === "Loose";
+        verdict = loose ? "Aseptic loosening — suspected" : "Well fixed — no loosening indicated";
+        tone = loose ? "bad" : "ok";
+        const margin = Math.abs((cls.probability ?? 0) - (cls.threshold ?? 0));
+        detail =
+            `p(loose) = ${(cls.probability ?? 0).toFixed(3)} against a decision threshold of ` +
+            `${(cls.threshold ?? 0).toFixed(4)}. Reported confidence in "${esc(cls.label)}" is ` +
+            `${pct(cls.confidence)}. Margin to threshold ${margin.toFixed(3)}` +
+            (margin < 0.1 ? " — a marginal call that warrants a second read." : ".");
+    } else if (study.classError) {
+        verdict = "Classification unavailable";
+        tone = "warn";
+        detail = esc(study.classError);
+    } else {
+        verdict = "Not classified";
+        tone = "warn";
+        detail = "The loosening classifier did not return a result for this study.";
+    }
+
+    // --- detections --------------------------------------------------------
+    const dets = study.status === "done" ? (study.detections ?? []) : [];
+    const detTable = dets.length
+        ? `<table class="tbl"><thead><tr><th>#</th><th>Label</th><th>Confidence</th>` +
+          `<th>x1</th><th>y1</th><th>x2</th><th>y2</th></tr></thead><tbody>` +
+          dets
+              .map((d, i) => {
+                  const [x1, y1, x2, y2] = d.box.map((v) => Math.round(v));
+                  return (
+                      `<tr><td>${i + 1}</td><td>${esc(d.label ?? "implant")}</td>` +
+                      `<td>${Number(d.confidence ?? 0).toFixed(3)}</td>` +
+                      `<td>${x1}</td><td>${y1}</td><td>${x2}</td><td>${y2}</td></tr>`
+                  );
+              })
+              .join("") +
+          `</tbody></table>`
+        : `<p class="muted">No implant scored above the ` +
+          `${fmt2(r?.conf_threshold ?? Number(el.confRange.value))} confidence threshold.</p>`;
+
+    // --- case + software / model metadata --------------------------------
+    const caseRows = [
+        kvRow("Patient ID", meta.patientId),
+        kvRow("Patient name", meta.patientName),
+        kvRow("Study date", meta.studyDate),
+        kvRow("Reporting clinician", meta.clinician),
+        kvRow("Source file", study.name),
+        kvRow("Image", `${images.width} × ${images.height} px · ${study.kind}`),
+        kvRow("Analysis run", now.toLocaleString()),
+    ].join("");
+
+    const detLatency =
+        study.latencyMs != null ? study.latencyMs : r?.inference_ms;
+    const clsLatency =
+        study.classLatencyMs != null ? study.classLatencyMs : cls?.inference_ms;
+    const vm = clsInfo?.val_metrics;
+    const metaRows = [
+        kvRow("Frontend software", `Implant Locator Workstation v${APP_VERSION}`),
+        kvRow("Inference API", `Implant Locator Inference API v${server.apiVersion ?? "unknown"}`),
+        kvRow("Detector checkpoint", shortPath(server.modelPath) ?? r?.model ?? "—"),
+        kvRow("Detector classes", (r?.classes ?? server.classes ?? []).join(", ") || "—"),
+        kvRow("Detector image size", `${r?.imgsz ?? server.imgsz} px`),
+        kvRow("Confidence threshold", (r?.conf_threshold ?? Number(el.confRange.value)).toFixed(2)),
+        kvRow("IoU / NMS threshold", (r?.iou_threshold ?? Number(el.iouRange.value)).toFixed(2)),
+        kvRow("Detector latency", detLatency != null ? `${Math.round(detLatency)} ms` : ""),
+        kvRow(
+            "Classifier checkpoint",
+            clsInfo?.available
+                ? `${shortPath(clsInfo.model_path) ?? clsInfo.model_name} · ${clsInfo.arch ?? cls?.arch ?? "CNN"}`
+                : cls
+                  ? `${cls.model ?? "classifier"} · ${cls.arch ?? "CNN"}`
+                  : "not loaded",
+        ),
+        kvRow("Classifier classes", (cls?.classes ?? clsInfo?.classes ?? []).join(", ") || "—"),
+        kvRow(
+            "Classifier image size",
+            cls?.imgsz ?? clsInfo?.img_size ? `${cls?.imgsz ?? clsInfo?.img_size} px` : "",
+        ),
+        kvRow(
+            "Decision threshold",
+            cls ? Number(cls.threshold ?? clsInfo?.threshold ?? 0).toFixed(4) : "",
+        ),
+        kvRow("Classifier latency", clsLatency != null ? `${Math.round(clsLatency)} ms` : ""),
+        kvRow(
+            "Model validation",
+            vm
+                ? `AUC ${num(vm.auc)}, accuracy ${num(vm.accuracy)}, sensitivity ${num(vm.sensitivity)}, ` +
+                  `specificity ${num(vm.specificity)} (validation split, not this case)`
+                : "",
+        ),
+        kvRow("Endpoints", `${PREDICT_ENDPOINT} · ${CLASSIFY_ENDPOINT}`),
+        kvRow("Window / level applied", `${el.windowRange.value} / ${el.levelRange.value}`),
+    ].join("");
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Loosening report — ${esc(study.name)}</title>
+<style>
+  @page { size: A4; margin: 16mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.5 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #14161f; background: #f4f5f8; }
+  .sheet { max-width: 820px; margin: 24px auto; background: #fff; padding: 32px 36px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+  header.rep { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 2px solid #14161f; padding-bottom: 12px; }
+  header.rep h1 { font-size: 18px; margin: 0 0 2px; }
+  header.rep .sub { color: #5b6070; font-size: 12px; }
+  .proto { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #a23c3c; border: 1px solid #d9a9a9; border-radius: 4px; padding: 3px 7px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  h2 { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #5b6070; margin: 22px 0 8px; }
+  section { break-inside: avoid; }
+  .verdict { border: 1px solid; border-radius: 8px; padding: 12px 14px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .verdict.ok { border-color: #b7e0c6; background: #eef8f1; }
+  .verdict.bad { border-color: #e6b6b6; background: #fbeeee; }
+  .verdict.warn { border-color: #e6d3a8; background: #fbf4e4; }
+  .verdict b { display: block; font-size: 15px; margin-bottom: 3px; }
+  .verdict p { margin: 0; font-size: 12px; color: #3a3f4d; }
+  .kv-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; margin: 0; }
+  .kv { display: flex; gap: 8px; border-bottom: 1px solid #eceef2; padding: 4px 0; font-size: 12px; }
+  .kv dt { color: #5b6070; min-width: 132px; flex: none; }
+  .kv dd { margin: 0; font-weight: 500; word-break: break-word; }
+  figure { margin: 0; }
+  figure img { width: 100%; border: 1px solid #ccced8; display: block; }
+  .fig-aside { max-width: 280px; }
+  figcaption { font-size: 11px; color: #5b6070; margin-top: 4px; }
+  table.tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  table.tbl th, table.tbl td { border: 1px solid #dcdfe6; padding: 4px 7px; text-align: right; }
+  table.tbl th { background: #f2f3f6; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  table.tbl th:nth-child(2), table.tbl td:nth-child(2) { text-align: left; }
+  .muted { color: #5b6070; font-size: 12px; }
+  .notes { white-space: pre-wrap; border: 1px solid #eceef2; border-radius: 6px; padding: 10px 12px; font-size: 12px; }
+  footer.rep { margin-top: 26px; border-top: 1px solid #dcdfe6; padding-top: 10px; font-size: 10.5px; color: #6b7080; }
+  .bar { display: flex; gap: 8px; justify-content: center; padding: 10px; background: #14161f; }
+  .bar button { font: inherit; font-size: 12px; padding: 7px 14px; border: 0; border-radius: 6px; background: #9184d9; color: #fff; cursor: pointer; }
+  @media print { body { background: #fff; } .sheet { box-shadow: none; margin: 0; max-width: none; padding: 0; } .bar { display: none; } }
+</style>
+</head>
+<body>
+<div class="bar">
+  <button type="button" onclick="window.print()">Print / Save as PDF</button>
+  <button type="button" onclick="window.close()">Close</button>
+</div>
+<div class="sheet">
+  <header class="rep">
+    <div>
+      <h1>Implant Loosening Analysis Report</h1>
+      <div class="sub">BMEG5552 · University of Western Australia · automated screening prototype</div>
+    </div>
+    <span class="proto">Not for clinical use</span>
+  </header>
+
+  <section>
+    <h2>Diagnosis</h2>
+    <div class="verdict ${tone}"><b>${esc(verdict)}</b><p>${detail}</p></div>
+  </section>
+
+  <section>
+    <h2>Case</h2>
+    <dl class="kv-list">${caseRows}</dl>
+    ${meta.notes ? `<h2>Notes</h2><div class="notes">${esc(meta.notes)}</div>` : ""}
+  </section>
+
+  <section>
+    <h2>Imaging</h2>
+    <figure>
+      <img alt="X-ray with implant bounding box and Grad-CAM overlay" src="${images.composite}">
+      <figcaption>YOLO bounding box (green) and Grad-CAM saliency from the ResNet50 classifier, drawn over the X-ray at window/level ${esc(el.windowRange.value)}/${esc(el.levelRange.value)} as reviewed. Grad-CAM is renormalised per image, so a hot spot appears even when the underlying activation is negligible.</figcaption>
+    </figure>
+    <figure class="fig-aside" style="margin-top:14px">
+      <img alt="Original X-ray" src="${images.original}">
+      <figcaption>Source X-ray, overlays removed.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>Detections</h2>
+    ${detTable}
+  </section>
+
+  <section>
+    <h2>Software &amp; model metadata</h2>
+    <dl class="kv-list">${metaRows}</dl>
+  </section>
+
+  <footer class="rep">
+    Generated by Implant Locator Workstation v${esc(APP_VERSION)} on ${esc(now.toLocaleString())}.
+    The loosening classifier was trained on 206 images from a single public database — far too small to support a clinical claim.
+    This report is a demonstration artefact and must not be used to guide patient care.
+  </footer>
+</div>
+<script>window.addEventListener("load", function () { setTimeout(function () { try { window.focus(); window.print(); } catch (e) {} }, 400); });</script>
+</body>
+</html>`;
+}
+
+async function exportPdfReport() {
+    const study = activeStudy();
+    if (!study || (!study.response && !study.classification)) return;
+
+    const label = el.reportBtn.textContent;
+    el.reportBtn.disabled = true;
+    el.reportBtn.textContent = "Preparing…";
+    try {
+        const meta = collectReportMeta();
+        const images = await buildReportImages(study);
+        const win = window.open("", "_blank");
+        if (!win) {
+            noteError(
+                "The report could not open a new tab. Allow pop-ups for this page, then try again.",
+            );
+            return;
+        }
+        win.document.open();
+        win.document.write(renderReportHtml(study, meta, images));
+        win.document.close();
+    } catch (err) {
+        console.error(err);
+        noteError(`Could not build the PDF report: ${err.message}`);
+    } finally {
+        el.reportBtn.textContent = label;
+        renderFindings();
+    }
+}
+
+// ---------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------
 
@@ -1436,6 +1850,21 @@ el.zoomReadout.addEventListener("click", () => {
 el.runBtn.addEventListener("click", runAnalysis);
 el.clearBtn.addEventListener("click", clearActive);
 el.exportBtn.addEventListener("click", exportJson);
+
+// The PDF report collects a few optional case fields first; browsers without
+// <dialog> support skip straight to the report.
+el.reportBtn.addEventListener("click", () => {
+    if (typeof el.reportDialog?.showModal === "function") el.reportDialog.showModal();
+    else exportPdfReport();
+});
+el.rfCancel.addEventListener("click", () => el.reportDialog.close("cancel"));
+el.reportDialog.addEventListener("close", () => {
+    if (el.reportDialog.returnValue === "go") exportPdfReport();
+});
+
+el.saveBox.addEventListener("click", () => saveOverlayImage("box"));
+el.saveHeat.addEventListener("click", () => saveOverlayImage("heat"));
+el.saveBoth.addEventListener("click", () => saveOverlayImage("both"));
 
 [el.confRange, el.iouRange].forEach((input) => {
     input.addEventListener("input", () => {
