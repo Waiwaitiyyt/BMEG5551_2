@@ -911,6 +911,81 @@ body.is-dragover .dropzone {
    being shrunk to fit — a collapsed <details> squashes to a 2px sliver. */
 .findings-scroll > * { flex: none; }
 
+/* — run-analysis staged loader —
+   Shown while runAnalysis() holds the result behind its 3–5 s animation. */
+
+.analysis-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 15px;
+    padding: 30px 20px 26px;
+    border: 1px solid var(--color-neutral-800);
+    border-radius: 10px;
+    background:
+        radial-gradient(120% 90% at 50% -10%, var(--color-accent-900), transparent 68%),
+        var(--ws-raised);
+}
+
+.al-orbit { position: relative; width: 46px; height: 46px; }
+.al-orbit span {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-top-color: var(--color-accent-400);
+    animation: spin 1.1s linear infinite;
+}
+.al-orbit span:nth-child(2) {
+    inset: 7px;
+    border-top-color: var(--color-accent-600);
+    animation-duration: 1.6s;
+    animation-direction: reverse;
+}
+.al-orbit span:nth-child(3) {
+    inset: 14px;
+    border-top-color: var(--color-accent-200);
+    animation-duration: .9s;
+}
+
+.al-phase {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--color-accent-200);
+    min-height: 1.2em;
+}
+.al-phase.is-in { animation: al-phase-in .32s ease-out; }
+@keyframes al-phase-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+}
+
+.al-track {
+    width: 100%;
+    max-width: 240px;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--color-neutral-900);
+    overflow: hidden;
+}
+.al-fill {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--color-accent-700), var(--color-accent-300));
+}
+
+.al-sub { margin: 0; font-size: 10.5px; color: var(--color-neutral-600); }
+
+@media (prefers-reduced-motion: reduce) {
+    .al-orbit span { animation-duration: 3s; }
+    .al-phase.is-in { animation: none; }
+    .al-fill { transition: none !important; }
+}
+
 .block-title {
     display: block;
     font-size: 11px;

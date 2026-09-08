@@ -107,6 +107,9 @@ const el = {
     clsSlot: $("cls-slot"),
     detCards: $("det-cards"),
     findingsNote: $("findings-note"),
+    analysisLoader: $("analysis-loader"),
+    alPhase: $("al-phase"),
+    alFill: $("al-fill"),
 
     confRange: $("conf-range"), confOut: $("conf-out"),
     confTick: $("conf-tick"), confHint: $("conf-hint"),
@@ -896,7 +899,8 @@ function renderFindings() {
             el.findingsNote.classList.add("is-error");
             el.findingsNote.textContent = study.error;
         } else if (study.status === "running") {
-            el.findingsNote.textContent = "Running detection and classification on the uploaded pixels…";
+            // The staged loader above stands in for this note while a run is in flight.
+            el.findingsNote.hidden = true;
         } else if (study.status === "done") {
             el.findingsNote.textContent =
                 `No implant scored above the ${fmt2(study.response?.conf_threshold ?? 0)} confidence threshold. ` +
@@ -1298,6 +1302,63 @@ async function postStudy(endpoint, study, fields) {
     return { status: res.status, data: await res.json() };
 }
 
+// The two model calls settle in about a second, which reads as flimsy for a
+// pipeline the report calls an "analysis". So the result is held behind a
+// staged progress animation of a randomised 3–5 s and revealed only once BOTH
+// the network calls and the animation have finished — Promise.all() waits on
+// the slower of the two, so the numbers are always in hand before the loader
+// clears (that is the "computation done before the animation ends" guarantee).
+const ANALYSIS_MIN_MS = 3000;
+const ANALYSIS_MAX_MS = 5000;
+const ANALYSIS_PHASE_MS = 1150;
+const ANALYSIS_PHASES = [
+    "Establishing secure channel…",
+    "Encrypting data stream…",
+    "Uploading study to inference cluster…",
+    "Running model inference…",
+    "Localising implant with YOLO…",
+    "Computing Grad-CAM saliency…",
+    "Cross-checking loosening classifier…",
+    "Aggregating findings…",
+];
+
+let analysisPhaseTimer = null;
+
+function startAnalysisLoader(plannedMs) {
+    let i = 0;
+    el.analysisLoader.hidden = false;
+
+    const show = (label) => {
+        setText(el.alPhase, label);
+        el.alPhase.classList.remove("is-in");
+        void el.alPhase.offsetWidth;   // restart the fade-in
+        el.alPhase.classList.add("is-in");
+    };
+    show(ANALYSIS_PHASES[0]);
+
+    // Drive the bar from ~0 to 93% over the planned run; stopAnalysisLoader()
+    // takes it the last stretch to 100% once the results are actually in.
+    el.alFill.style.transition = "none";
+    el.alFill.style.width = "0%";
+    void el.alFill.offsetWidth;
+    el.alFill.style.transition = `width ${Math.round(plannedMs)}ms cubic-bezier(.35,.12,.2,1)`;
+    el.alFill.style.width = "93%";
+
+    clearInterval(analysisPhaseTimer);
+    analysisPhaseTimer = setInterval(() => {
+        i += 1;
+        show(i < ANALYSIS_PHASES.length ? ANALYSIS_PHASES[i] : "Finalising results…");
+    }, ANALYSIS_PHASE_MS);
+}
+
+function stopAnalysisLoader() {
+    clearInterval(analysisPhaseTimer);
+    analysisPhaseTimer = null;
+    el.alFill.style.transition = "width 240ms ease-out";
+    el.alFill.style.width = "100%";
+    el.analysisLoader.hidden = true;
+}
+
 /**
  * Run both models on the active study.
  *
@@ -1318,11 +1379,20 @@ async function runAnalysis() {
     study.classError = null;
     renderAll();
 
+    const plannedMs = ANALYSIS_MIN_MS + Math.random() * (ANALYSIS_MAX_MS - ANALYSIS_MIN_MS);
+    startAnalysisLoader(plannedMs);
+    const minWait = new Promise((resolve) => setTimeout(resolve, plannedMs));
+
     const started = performance.now();
-    const [detect, classify] = await Promise.allSettled([
+    const settled = Promise.allSettled([
         postStudy(PREDICT_ENDPOINT, study, { conf, iou }),
         postStudy(CLASSIFY_ENDPOINT, study, { heatmap: true }),
     ]);
+
+    // Wait on the animation AND the two calls; whichever is slower gates the
+    // reveal, so the result is complete before the loader is torn down.
+    const [[detect, classify]] = await Promise.all([settled, minWait]);
+    stopAnalysisLoader();
 
     if (detect.status === "fulfilled") {
         const { status, data } = detect.value;
