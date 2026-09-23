@@ -27,3 +27,6 @@ kaggle.json
 
 # Model
 resnet50_models/
+# Blind-test package (patient images + answer key, never commit)
+blind_test_set.zip
+blind_test_key.csv
