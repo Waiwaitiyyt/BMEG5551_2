@@ -9,7 +9,8 @@
     "start": "tsx src/server.ts",
     "build": "tsc",
     "serve": "node dist/server.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
     "express": "^5.1.0",

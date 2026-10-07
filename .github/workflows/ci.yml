@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gateway:
+    name: Gateway + frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: server/ts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/ts/package-lock.json
+
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Gateway tests
+        run: npm test
+      - name: Frontend syntax check
+        run: node --check ../../public/app.js
+
+  inference:
+    name: Inference server
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server/py
+    steps:
+      - uses: actions/checkout@v4
+
+      # torch and its CUDA wheels are several GB; keep them in the cache
+      # instead of letting setup-uv prune pre-built wheels after each run.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false
+          cache-dependency-glob: server/py/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: API and unit tests
+        run: uv run pytest -v
+
+  e2e:
+    name: End-to-end (browser)
+    needs: [gateway, inference]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            server/ts/package-lock.json
+            tests/e2e/package-lock.json
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          prune-cache: false
+          cache-dependency-glob: server/py/uv.lock
+
+      - name: Install dependencies
+        run: |
+          uv sync --locked --project server/py
+          npm ci --prefix server/ts
+          npm ci --prefix tests/e2e
+          npx --prefix tests/e2e playwright install --with-deps chromium
+
+      # Playwright launches ./start.sh itself and stops it afterwards.
+      - name: Browser tests
+        working-directory: tests/e2e
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+            logs/
+          retention-days: 7

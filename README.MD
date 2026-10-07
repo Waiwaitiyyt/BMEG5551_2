@@ -60,6 +60,7 @@ nothing is written to disk.
 │   │   ├── .python-version  #   Python version (3.11+)
 │   │   ├── server.py        #   FastAPI app entrypoint (/predict, /classify, /health)
 │   │   ├── classifier.py    #   ResNet50 loosening classifier + Grad-CAM
+│   │   ├── tests/           #   pytest: unit + API tests against the real weights
 │   │   └── weights/
 │   │       ├── best.pt      #   Trained YOLO checkpoint (localisation)
 │   │       └── classifier.pt #  Trained ResNet50 checkpoint (prediction + heat map)
@@ -67,8 +68,14 @@ nothing is written to disk.
 │   └── ts/                  # TypeScript backend — Express gateway
 │       ├── package.json     #   Node dependencies (Express, http-proxy-middleware)
 │       ├── tsconfig.json
-│       └── src/
-│           └── server.ts    #   Static hosting + /api proxy to FastAPI
+│       ├── src/
+│       │   ├── app.ts       #   Static hosting + /api proxy to FastAPI
+│       │   └── server.ts    #   Entry point: reads env, listens
+│       └── test/            #   node:test gateway tests (stub upstream)
+│
+├── tests/e2e/               # Playwright browser tests of the full workstation
+├── .github/workflows/ci.yml # CI: gateway, inference and e2e jobs
+├── img/                     # README and presentation screenshots
 │
 ├── tools/                   # Utility scripts (dataset download, labelling, training)
 │   ├── pyproject.toml       #   Python dependencies (kagglehub, label-studio, ultralytics)
@@ -733,6 +740,26 @@ map roughly triples CPU latency (~0.5 s versus ~0.19 s), which is why
 the *relative* peak — on a confidently `Control` case it still lights up
 somewhere, marking the best evidence for loosening the model could find, which
 may be almost none.
+
+---
+
+## Testing
+
+All three suites run in CI (`.github/workflows/ci.yml`) on every push to `main` and every pull request.
+
+```bash
+# Express gateway: typecheck + node:test against a stub inference server
+cd server/ts && npm run typecheck && npm test
+
+# FastAPI server: validation helpers, Grad-CAM helpers, and /health, /predict,
+# /classify against the committed weights. Two reference-case tests use the
+# gitignored dataset and are skipped when it is not downloaded.
+cd server/py && uv run pytest
+
+# Browser end-to-end: Playwright starts ./start.sh itself (or reuses one
+# already running locally), then uploads, analyses, compares and exports a report
+cd tests/e2e && npm install && npx playwright install chromium && npm test
+```
 
 ---
 
